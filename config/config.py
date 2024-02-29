@@ -1,132 +1,77 @@
 
 import chamfer
 import sys
+import os
 from enum import Enum,auto
-
-try:
-	import psutil
-except ModuleNotFoundError:
-	print("No psutil module.");
-
-try:
-	from Xlib.keysymdef import latin1,miscellany,xf86
-	from Xlib import XK
-except ModuleNotFoundError:
-	print("No Xlib module.");
-
-try:
-	import pulsectl
-except ModuleNotFoundError:
-	print("No pulsectl module.");
 
 class ShaderFlag(Enum):
 	FOCUS_NEXT = chamfer.shaderFlag.USER_BIT<<0x0
 
 #Refer to the documentation
 #https://jaelpark.github.io/chamferwm-docs/bindings.html
-#for all the keybinding and how to setup them.
-
-class Key(Enum):
-	FOCUS_RIGHT = auto()
-	FOCUS_LEFT = auto()
-	FOCUS_UP = auto()
-	FOCUS_DOWN = auto()
-	FOCUS_PARENT = auto()
-	FOCUS_CHILD = auto()
-	FOCUS_MRU = auto()
-	FOCUS_FLOAT = auto()
-	FOCUS_FLOAT_PREV = auto()
-
-	FOCUS_PARENT_RIGHT = auto()
-	FOCUS_PARENT_LEFT = auto()
-
-	YANK_CONTAINER = auto()
-	YANK_APPEND_CONTAINER = auto()
-	PASTE_CONTAINER = auto()
-
-	MOVE_LEFT = auto()
-	MOVE_RIGHT = auto()
-
-	LIFT_CONTAINER = auto()
-
-	LAYOUT = auto()
-	SPLIT_V = auto()
-	FULLSCREEN = auto()
-	STACK = auto()
-	STACK_RIGHT = auto()
-	STACK_LEFT = auto()
-	FLOAT = auto()
-
-	CONTRACT_ROOT_RESET = auto()
-	CONTRACT_ROOT_LEFT = auto() #contract left side
-	CONTRACT_ROOT_RIGHT = auto() #contract right side
-	EXPAND_ROOT_LEFT = auto()
-	EXPAND_ROOT_RIGHT = auto() #right side
-
-	CONTRACT_RESET = auto()
-	CONTRACT_HORIZONTAL = auto()
-	CONTRACT_HORIZONTAL_LOCAL = auto()
-	CONTRACT_VERTICAL = auto()
-	CONTRACT_VERTICAL_LOCAL = auto()
-	EXPAND_HORIZONTAL = auto()
-	EXPAND_HORIZONTAL_LOCAL = auto()
-	EXPAND_VERTICAL = auto()
-	EXPAND_VERTICAL_LOCAL = auto()
-
-	WORKSPACE_1 = auto()
-	WORKSPACE_2 = auto()
-	WORKSPACE_3 = auto()
-	WORKSPACE_4 = auto()
-	WORKSPACE_NOCOMP = auto()
-
-	KILL = auto()
-	LAUNCH_TERMINAL = auto()
-	LAUNCH_BROWSER = auto()
-	LAUNCH_BROWSER_PRIVATE = auto()
-
-	AUDIO_VOLUME_MUTE = auto()
-	AUDIO_VOLUME_UP = auto()
-	AUDIO_VOLUME_DOWN = auto()
-
-	MONITOR_BRIGHTNESS_UP = auto()
-	MONITOR_BRIGHTNESS_DOWN = auto()
-
-	MODIFIER_1 = auto()
-	MODIFIER_4 = auto()
-
-	NOOP = auto()
+#for all the keybindings and how to setup them.
+#TLDR: define the key binding in OnSetupKeys() and the
+#behaviour in OnKeyPress().
 
 class Container(chamfer.Container):
 	#setup the container before it's created (dimensions)
 	def OnSetupContainer(self):
-		self.margin = (0.015,0.015);
-		self.minSize = (0.3,0.2);
-
-		self.splitArmed = False;
+		self.margin = (0.015,0.015); #Relative amount of empty space around containers (i.e. gap). Fragment shader covers this area for over-reaching decorations.
+		self.minSize = (0.3,0.2); #Minimum size of the container, before they start to overlap
 
 		self.titleBar = chamfer.titleBar.TOP; #options for the title bar location are NONE, LEFT, TOP, RIGHT or BOTTOM
+		self.titleStackOnly = True; #disable to always show title bars
 
-		#if self.wm_class == "skype":
-		#	self.floatingMode = chamfer.floatingMode.NEVER;
+		#WM_CLASS/TITLE rules to force floating mode / never float
 		if self.wm_class == "matplotlib":
-			self.floatingMode = chamfer.floatingMode.ALWAYS;
+			#Example: always float matplotlib graph windows.
+			self.floatingMode = chamfer.floatingMode.ALWAYS; #.NEVER
 
 	#setup the client before it's created (shaders)
 	def OnSetupClient(self):
-		#TODO: Panels, docks etc. should be rendered with no decorations. Later, it should be possible to check this by looking at the window type property, not just the class name.
 		try:
 			print("Setting up \"{}\" ({})".format(self.wm_name,self.wm_class),flush=True);
 		except UnicodeDecodeError:
-			print("UnicodeDecodeError",flush=True);
+			pass;
 
-		if self.wm_class == "Conky":
-			self.vertexShader = "default_vertex.spv";
-			self.geometryShader = "default_geometry.spv";
-			self.fragmentShader = "default_fragment.spv";
+		#Setup shaders for the newly created client container.
+		#The stock build includes the following fragment shaders
+		#build by default:
+
+		#1. frame_fragment.spv: default "demo" decoration with border and rounded corners
+		#2. frame_fragment_basic.spv: rectangular borders with focus highlight, no bling
+		#3. frame_fragment_ext.spv: #default rounded corner style for external wms
+		#4. frame_fragment_ext_basic.spv: #simple compatible style for external wms, only draw shadows
+		#5. default_fragment.spv: #absolutely no decoration (goes together with default_vertex.spv and
+		#   (default_geometry.spv)
+
+		#All shader builds include the shadows by default. Shadows can be
+		#removed by disabling the build feature in meson.build. Other features
+		#such as the border thickness, rounding, and colors can be edited
+		#in the shader source itself (for now).
+
+		if not chamfer.backend.standaloneCompositor:
+			#Shaders for the chamferwm.
+			if self.wm_class == "Conky":
+				#Example: zero decoration for conky system monitor.
+				#Add docks and other desktop widgets similarly,
+				#if needed.
+				self.vertexShader = "default_vertex.spv";
+				self.geometryShader = "default_geometry.spv";
+				self.fragmentShader = "default_fragment.spv";
+			else:
+				self.vertexShader = "frame_vertex.spv";
+				self.geometryShader = "frame_geometry.spv";
+				self.fragmentShader = "frame_fragment.spv";
 		else:
+			#Shader for other window managers (standalone
+			#compositor mode).
 			self.vertexShader = "frame_vertex.spv";
 			self.geometryShader = "frame_geometry.spv";
-			self.fragmentShader = "frame_fragment.spv";
+			self.fragmentShader = "frame_fragment_ext.spv";
+
+		#this is just to restore the defaults when leaving fullscreen (used in OnFullscreen())
+		self.defaultShaders = (self.vertexShader,self.geometryShader,self.fragmentShader);
 
 	#select and assign a parent container
 	def OnParent(self):
@@ -146,20 +91,19 @@ class Container(chamfer.Container):
 		try:
 			print("Created client \"{}\" ({})".format(self.wm_name,self.wm_class),flush=True);
 		except UnicodeDecodeError:
-			print("UnicodeDecodeError",flush=True);
+			pass
 		self.Focus();
 
-	#called to request fullscreen mode - either by calling SetFullscreen or by client message
+	#Called to request fullscreen mode - either by calling SetFullscreen or by client message.
+	#Not used in standalone compositor mode.
 	def OnFullscreen(self, toggle):
-		#In fullscreen mode, no decorations
+		#In fullscreen mode, no decorations.
 		if toggle:
 			self.vertexShader = "default_vertex.spv";
 			self.geometryShader = "default_geometry.spv";
 			self.fragmentShader = "default_fragment.spv";
 		else:
-			self.vertexShader = "frame_vertex.spv";
-			self.geometryShader = "frame_geometry.spv";
-			self.fragmentShader = "frame_fragment.spv";
+			self.vertexShader,self.geometryShader,self.fragmentShader = self.defaultShaders;
 
 		return True;
 	
@@ -167,20 +111,17 @@ class Container(chamfer.Container):
 	def OnFocus(self):
 		return True;
 
-	#called when window is stacked or unstacked
+	#called when window is stacked or unstacked - only called for the parent container
 	def OnStack(self, toggle):
 		pass;
 
 	#called every time a client property has changed (title etc.)
 	def OnPropertyChange(self, propId):
-		try:
-			print(self.wm_name,flush=True);
-		except UnicodeDecodeError:
-			print("UnicodeDecodeError",flush=True);
+		pass; #self.wm_name, etc.
 
 	#called whenever cursor enters the window
 	def OnEnter(self):
-		#self.focus();
+		#self.Focus();
 		pass;
 	
 	#Place container under another so that its structure remains intact.
@@ -219,120 +160,137 @@ class Container(chamfer.Container):
 	
 class Backend(chamfer.Backend):
 	def OnSetupKeys(self, debug):
+		#Helper function to create key binding IDs
+		def KeyId(keyId):
+			nonlocal self;
+			if hasattr(self,keyId):
+				return getattr(self,keyId);
+			try:
+				self.keyCounter += 1;
+				setattr(self,keyId,self.keyCounter);
+			except AttributeError:
+				self.keyCounter = 0;
+				setattr(self,keyId,0);
+			return self.keyCounter;
+
 		if not debug:
 			self.modMask = chamfer.MOD_MASK_1;
 			#setup key bindings
 			#focusing clients
-			self.BindKey(ord('l'),self.modMask,Key.FOCUS_RIGHT.value);
-			self.BindKey(ord('l'),self.modMask|chamfer.MOD_MASK_SHIFT,Key.MOVE_RIGHT.value);
-			self.BindKey(ord('h'),self.modMask,Key.FOCUS_LEFT.value);
-			self.BindKey(ord('h'),self.modMask|chamfer.MOD_MASK_SHIFT,Key.MOVE_LEFT.value);
-			self.BindKey(ord('k'),self.modMask,Key.FOCUS_UP.value);
-			self.BindKey(ord('j'),self.modMask,Key.FOCUS_DOWN.value);
-			self.BindKey(ord('a'),self.modMask,Key.FOCUS_PARENT.value);
-			self.BindKey(ord('s'),self.modMask,Key.FOCUS_CHILD.value);
-			self.BindKey(miscellany.XK_Tab,chamfer.MOD_MASK_4,Key.FOCUS_MRU.value);
-			self.BindKey(miscellany.XK_Tab,chamfer.MOD_MASK_1,Key.FOCUS_FLOAT.value);
-			self.BindKey(miscellany.XK_Tab,chamfer.MOD_MASK_1|chamfer.MOD_MASK_SHIFT,Key.FOCUS_FLOAT_PREV.value);
+			self.BindKey(ord('l'),self.modMask,KeyId('FOCUS_RIGHT'));
+			self.BindKey(ord('l'),self.modMask|chamfer.MOD_MASK_SHIFT,KeyId('MOVE_RIGHT'));
+			self.BindKey(ord('h'),self.modMask,KeyId('FOCUS_LEFT'));
+			self.BindKey(ord('h'),self.modMask|chamfer.MOD_MASK_SHIFT,KeyId('MOVE_LEFT'));
+			self.BindKey(ord('k'),self.modMask,KeyId('FOCUS_UP'));
+			self.BindKey(ord('j'),self.modMask,KeyId('FOCUS_DOWN'));
+			self.BindKey(ord('a'),self.modMask,KeyId('FOCUS_PARENT'));
+			self.BindKey(ord('s'),self.modMask,KeyId('FOCUS_CHILD'));
+			self.BindKey(miscellany.XK_Tab,chamfer.MOD_MASK_4,KeyId('FOCUS_MRU'));
+			self.BindKey(miscellany.XK_Tab,chamfer.MOD_MASK_1,KeyId('FOCUS_FLOAT'));
+			self.BindKey(miscellany.XK_Tab,chamfer.MOD_MASK_1|chamfer.MOD_MASK_SHIFT,KeyId('FOCUS_FLOAT_PREV'));
 			
 			#reserved
-			self.BindKey(ord('l'),chamfer.MOD_MASK_4,Key.FOCUS_PARENT_RIGHT.value);
-			self.BindKey(ord('h'),chamfer.MOD_MASK_4,Key.FOCUS_PARENT_LEFT.value);
+			self.BindKey(ord('l'),chamfer.MOD_MASK_4,KeyId('FOCUS_PARENT_RIGHT'));
+			self.BindKey(ord('h'),chamfer.MOD_MASK_4,KeyId('FOCUS_PARENT_LEFT'));
 
 			#yanking and pasting containers
-			self.BindKey(ord('y'),self.modMask,Key.YANK_CONTAINER.value);
-			self.BindKey(ord('y'),self.modMask|chamfer.MOD_MASK_CONTROL,Key.YANK_APPEND_CONTAINER.value);
-			self.BindKey(ord('p'),self.modMask,Key.PASTE_CONTAINER.value);
+			self.BindKey(ord('y'),self.modMask,KeyId('YANK_CONTAINER'));
+			self.BindKey(ord('y'),self.modMask|chamfer.MOD_MASK_CONTROL,KeyId('YANK_APPEND_CONTAINER'));
+			self.BindKey(ord('p'),self.modMask,KeyId('PASTE_CONTAINER'));
 
 			#misc grouping and parenting operations
-			self.BindKey(ord('w'),self.modMask,Key.LIFT_CONTAINER.value);
+			self.BindKey(ord('w'),self.modMask,KeyId('LIFT_CONTAINER'));
 
 			#layout, splits and fullscreen
-			self.BindKey(ord('e'),self.modMask,Key.LAYOUT.value);
-			self.BindKey(latin1.XK_onehalf,self.modMask,Key.SPLIT_V.value);
-			self.BindKey(ord('v'),self.modMask,Key.SPLIT_V.value);
-			self.BindKey(ord('f'),self.modMask,Key.FULLSCREEN.value);
-			self.BindKey(ord('t'),self.modMask,Key.STACK.value);
-			self.BindKey(ord('l'),self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,Key.STACK_RIGHT.value);
-			self.BindKey(ord('h'),self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,Key.STACK_LEFT.value);
-			self.BindKey(latin1.XK_space,self.modMask,Key.FLOAT.value);
+			self.BindKey(ord('e'),self.modMask,KeyId('LAYOUT'));
+			self.BindKey(latin1.XK_onehalf,self.modMask,KeyId('SPLIT_V'));
+			self.BindKey(ord('v'),self.modMask,KeyId('SPLIT_V'));
+			self.BindKey(ord('f'),self.modMask,KeyId('FULLSCREEN'));
+			self.BindKey(ord('t'),self.modMask,KeyId('STACK'));
+			self.BindKey(ord('l'),self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,KeyId('STACK_RIGHT'));
+			self.BindKey(ord('h'),self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,KeyId('STACK_LEFT'));
+			self.BindKey(latin1.XK_space,self.modMask,KeyId('FLOAT'));
 
 			#workspace dimensions
-			self.BindKey(ord('r'),chamfer.MOD_MASK_4,Key.CONTRACT_ROOT_RESET.value);
-			self.BindKey(ord('u'),chamfer.MOD_MASK_4,Key.CONTRACT_ROOT_LEFT.value);
-			self.BindKey(ord('i'),chamfer.MOD_MASK_4,Key.CONTRACT_ROOT_RIGHT.value);
-			self.BindKey(ord('u'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,Key.EXPAND_ROOT_LEFT.value);
-			self.BindKey(ord('i'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,Key.EXPAND_ROOT_RIGHT.value);
+			self.BindKey(ord('r'),chamfer.MOD_MASK_4,KeyId('CONTRACT_ROOT_RESET'));
+			self.BindKey(ord('u'),chamfer.MOD_MASK_4,KeyId('CONTRACT_ROOT_LEFT'));
+			self.BindKey(ord('i'),chamfer.MOD_MASK_4,KeyId('CONTRACT_ROOT_RIGHT'));
+			self.BindKey(ord('u'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,KeyId('EXPAND_ROOT_LEFT'));
+			self.BindKey(ord('i'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,KeyId('EXPAND_ROOT_RIGHT'));
 
 			#client dimensions
-			self.BindKey(ord('r'),self.modMask,Key.CONTRACT_RESET.value);
+			self.BindKey(ord('r'),self.modMask,KeyId('CONTRACT_RESET'));
 
-			self.BindKey(latin1.XK_minus,self.modMask,Key.CONTRACT_HORIZONTAL.value);
-			self.BindKey(ord('j'),chamfer.MOD_MASK_4,Key.CONTRACT_HORIZONTAL.value);
-			self.BindKey(latin1.XK_minus,self.modMask|chamfer.MOD_MASK_CONTROL,Key.CONTRACT_HORIZONTAL_LOCAL.value);
-			self.BindKey(ord('j'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_CONTROL,Key.CONTRACT_HORIZONTAL_LOCAL.value);
+			self.BindKey(latin1.XK_minus,self.modMask,KeyId('CONTRACT_HORIZONTAL'));
+			self.BindKey(ord('j'),chamfer.MOD_MASK_4,KeyId('CONTRACT_HORIZONTAL'));
+			self.BindKey(latin1.XK_minus,self.modMask|chamfer.MOD_MASK_CONTROL,KeyId('CONTRACT_HORIZONTAL_LOCAL'));
+			self.BindKey(ord('j'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_CONTROL,KeyId('CONTRACT_HORIZONTAL_LOCAL'));
 
-			self.BindKey(latin1.XK_minus,self.modMask|chamfer.MOD_MASK_SHIFT,Key.CONTRACT_VERTICAL.value);
-			self.BindKey(ord('j'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,Key.CONTRACT_VERTICAL.value);
-			self.BindKey(latin1.XK_minus,self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,Key.CONTRACT_VERTICAL_LOCAL.value);
-			self.BindKey(ord('j'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,Key.CONTRACT_VERTICAL_LOCAL.value);
+			self.BindKey(latin1.XK_minus,self.modMask|chamfer.MOD_MASK_SHIFT,KeyId('CONTRACT_VERTICAL'));
+			self.BindKey(ord('j'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,KeyId('CONTRACT_VERTICAL'));
+			self.BindKey(latin1.XK_minus,self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,KeyId('CONTRACT_VERTICAL_LOCAL'));
+			self.BindKey(ord('j'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,KeyId('CONTRACT_VERTICAL_LOCAL'));
 
-			self.BindKey(latin1.XK_plus,self.modMask,Key.EXPAND_HORIZONTAL.value);
-			self.BindKey(ord('k'),chamfer.MOD_MASK_4,Key.EXPAND_HORIZONTAL.value);
-			self.BindKey(latin1.XK_plus,self.modMask|chamfer.MOD_MASK_CONTROL,Key.EXPAND_HORIZONTAL_LOCAL.value);
-			self.BindKey(ord('k'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_CONTROL,Key.EXPAND_HORIZONTAL_LOCAL.value);
+			self.BindKey(latin1.XK_plus,self.modMask,KeyId('EXPAND_HORIZONTAL'));
+			self.BindKey(ord('k'),chamfer.MOD_MASK_4,KeyId('EXPAND_HORIZONTAL'));
+			self.BindKey(latin1.XK_plus,self.modMask|chamfer.MOD_MASK_CONTROL,KeyId('EXPAND_HORIZONTAL_LOCAL'));
+			self.BindKey(ord('k'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_CONTROL,KeyId('EXPAND_HORIZONTAL_LOCAL'));
 
-			self.BindKey(latin1.XK_plus,self.modMask|chamfer.MOD_MASK_SHIFT,Key.EXPAND_VERTICAL.value);
-			self.BindKey(ord('k'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,Key.EXPAND_VERTICAL.value);
-			self.BindKey(latin1.XK_plus,self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,Key.EXPAND_VERTICAL_LOCAL.value);
-			self.BindKey(ord('k'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,Key.EXPAND_VERTICAL_LOCAL.value);
+			self.BindKey(latin1.XK_plus,self.modMask|chamfer.MOD_MASK_SHIFT,KeyId('EXPAND_VERTICAL'));
+			self.BindKey(ord('k'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT,KeyId('EXPAND_VERTICAL'));
+			self.BindKey(latin1.XK_plus,self.modMask|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,KeyId('EXPAND_VERTICAL_LOCAL'));
+			self.BindKey(ord('k'),chamfer.MOD_MASK_4|chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,KeyId('EXPAND_VERTICAL_LOCAL'));
 
-			#workspaces
-			self.BindKey(ord('1'),self.modMask,Key.WORKSPACE_1.value);
-			self.BindKey(ord('2'),self.modMask,Key.WORKSPACE_2.value);
-			self.BindKey(ord('3'),self.modMask,Key.WORKSPACE_3.value);
-			self.BindKey(ord('4'),self.modMask,Key.WORKSPACE_4.value);
-			self.BindKey(ord('0'),self.modMask,Key.WORKSPACE_NOCOMP.value);
+			#workspaces (regular and composed)
+			self.BindKey(ord('1'),self.modMask,KeyId('WORKSPACE_1'));
+			self.BindKey(ord('2'),self.modMask,KeyId('WORKSPACE_2'));
+			self.BindKey(ord('3'),self.modMask,KeyId('WORKSPACE_3'));
+			self.BindKey(ord('4'),self.modMask,KeyId('WORKSPACE_4'));
+			#one special workspace without compositor (maximize performance for fullscreen games, video and such)
+			self.BindKey(ord('0'),self.modMask,KeyId('WORKSPACE_NOCOMP'));
 			
-			#kill + launching applications
-			self.BindKey(ord('q'),self.modMask|chamfer.MOD_MASK_SHIFT,Key.KILL.value);
-			self.BindKey(miscellany.XK_Return,self.modMask,Key.LAUNCH_TERMINAL.value);
-			self.BindKey(ord('1'),chamfer.MOD_MASK_4,Key.LAUNCH_BROWSER.value);
-			self.BindKey(ord('2'),chamfer.MOD_MASK_4,Key.LAUNCH_BROWSER_PRIVATE.value);
+			#kill + launching applications (setup your default programs in the respective OnKeyPress if-branch)
+			self.BindKey(ord('q'),self.modMask|chamfer.MOD_MASK_SHIFT,KeyId('KILL'));
+			self.BindKey(miscellany.XK_Return,self.modMask,KeyId('LAUNCH_TERMINAL'));
+			self.BindKey(ord('1'),chamfer.MOD_MASK_4,KeyId('LAUNCH_BROWSER'));
+			self.BindKey(ord('2'),chamfer.MOD_MASK_4,KeyId('LAUNCH_BROWSER_PRIVATE'));
 
 			#volume
-			self.BindKey(xf86.XK_XF86_AudioMute,0,Key.AUDIO_VOLUME_MUTE.value);
-			self.BindKey(xf86.XK_XF86_AudioRaiseVolume,0,Key.AUDIO_VOLUME_UP.value);
-			self.BindKey(xf86.XK_XF86_AudioLowerVolume,0,Key.AUDIO_VOLUME_DOWN.value);
+			self.BindKey(xf86.XK_XF86_AudioMute,0,KeyId('AUDIO_VOLUME_MUTE'));
+			self.BindKey(xf86.XK_XF86_AudioRaiseVolume,0,KeyId('AUDIO_VOLUME_UP'));
+			self.BindKey(xf86.XK_XF86_AudioLowerVolume,0,KeyId('AUDIO_VOLUME_DOWN'));
+
+			#screenshots
+			self.BindKey(ord('s'),chamfer.MOD_MASK_4,KeyId('SCREENSHOT'));
 
 			#monitor brightness
-			self.BindKey(xf86.XK_XF86_MonBrightnessUp,0,Key.MONITOR_BRIGHTNESS_UP.value);
-			self.BindKey(xf86.XK_XF86_MonBrightnessDown,0,Key.MONITOR_BRIGHTNESS_DOWN.value);
+			self.BindKey(xf86.XK_XF86_MonBrightnessUp,0,KeyId('MONITOR_BRIGHTNESS_UP'));
+			self.BindKey(xf86.XK_XF86_MonBrightnessDown,0,KeyId('MONITOR_BRIGHTNESS_DOWN'));
 
 			#control mappings
-			self.MapKey(XK.XK_Alt_L,chamfer.MOD_MASK_1,Key.MODIFIER_1.value);
-			self.MapKey(XK.XK_Super_L,chamfer.MOD_MASK_4,Key.MODIFIER_4.value);
+			self.MapKey(XK.XK_Alt_L,chamfer.MOD_MASK_1,KeyId('MODIFIER_1'));
+			self.MapKey(XK.XK_Super_L,chamfer.MOD_MASK_4,KeyId('MODIFIER_4'));
 
 			#hacks
-			self.BindKey(ord('q'),chamfer.MOD_MASK_CONTROL,Key.NOOP.value); #prevent madness while browsing the web 
+			self.BindKey(ord('q'),chamfer.MOD_MASK_CONTROL,KeyId('NOOP')); #prevent madness while web browsing (disable Ctrl+Q by overriding it)
 
 		else:
 			#debug only (compositor testing mode)
-			self.BindKey(ord('h'),chamfer.MOD_MASK_SHIFT,Key.FOCUS_LEFT.value);
-			self.BindKey(ord('k'),chamfer.MOD_MASK_SHIFT,Key.FOCUS_UP.value);
-			self.BindKey(ord('l'),chamfer.MOD_MASK_SHIFT,Key.FOCUS_RIGHT.value);
-			self.BindKey(ord('j'),chamfer.MOD_MASK_SHIFT,Key.FOCUS_DOWN.value);
-			self.BindKey(ord('u'),chamfer.MOD_MASK_SHIFT,Key.MOVE_LEFT.value);
-			self.BindKey(ord('i'),chamfer.MOD_MASK_SHIFT,Key.MOVE_RIGHT.value);
-			self.BindKey(ord('a'),chamfer.MOD_MASK_SHIFT,Key.FOCUS_PARENT.value);
-			self.BindKey(ord('s'),chamfer.MOD_MASK_SHIFT,Key.FOCUS_CHILD.value);
-			self.BindKey(ord('y'),chamfer.MOD_MASK_SHIFT,Key.YANK_CONTAINER.value);
-			self.BindKey(ord('y'),chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,Key.YANK_APPEND_CONTAINER.value);
-			self.BindKey(ord('p'),chamfer.MOD_MASK_SHIFT,Key.PASTE_CONTAINER.value);
-			self.BindKey(ord('w'),chamfer.MOD_MASK_SHIFT,Key.LIFT_CONTAINER.value);
-			self.BindKey(ord('e'),chamfer.MOD_MASK_SHIFT,Key.LAYOUT.value);
-			self.BindKey(ord('t'),chamfer.MOD_MASK_SHIFT,Key.STACK.value);
-			self.BindKey(latin1.XK_onehalf,chamfer.MOD_MASK_SHIFT,Key.SPLIT_V.value);
+			self.BindKey(ord('h'),chamfer.MOD_MASK_SHIFT,KeyId('FOCUS_LEFT'));
+			self.BindKey(ord('k'),chamfer.MOD_MASK_SHIFT,KeyId('FOCUS_UP'));
+			self.BindKey(ord('l'),chamfer.MOD_MASK_SHIFT,KeyId('FOCUS_RIGHT'));
+			self.BindKey(ord('j'),chamfer.MOD_MASK_SHIFT,KeyId('FOCUS_DOWN'));
+			self.BindKey(ord('u'),chamfer.MOD_MASK_SHIFT,KeyId('MOVE_LEFT'));
+			self.BindKey(ord('i'),chamfer.MOD_MASK_SHIFT,KeyId('MOVE_RIGHT'));
+			self.BindKey(ord('a'),chamfer.MOD_MASK_SHIFT,KeyId('FOCUS_PARENT'));
+			self.BindKey(ord('s'),chamfer.MOD_MASK_SHIFT,KeyId('FOCUS_CHILD'));
+			self.BindKey(ord('y'),chamfer.MOD_MASK_SHIFT,KeyId('YANK_CONTAINER'));
+			self.BindKey(ord('y'),chamfer.MOD_MASK_SHIFT|chamfer.MOD_MASK_CONTROL,KeyId('YANK_APPEND_CONTAINER'));
+			self.BindKey(ord('p'),chamfer.MOD_MASK_SHIFT,KeyId('PASTE_CONTAINER'));
+			self.BindKey(ord('w'),chamfer.MOD_MASK_SHIFT,KeyId('LIFT_CONTAINER'));
+			self.BindKey(ord('e'),chamfer.MOD_MASK_SHIFT,KeyId('LAYOUT'));
+			self.BindKey(ord('t'),chamfer.MOD_MASK_SHIFT,KeyId('STACK'));
+			self.BindKey(latin1.XK_onehalf,chamfer.MOD_MASK_SHIFT,KeyId('SPLIT_V'));
 	
 	def OnCreateContainer(self):
 		print("OnCreateContainer()",flush=True);
@@ -342,40 +300,40 @@ class Backend(chamfer.Backend):
 		focus = self.GetFocus();
 		parent = focus.GetParent();
 
-		if keyId == Key.FOCUS_RIGHT.value:
+		if keyId == self.FOCUS_RIGHT:
 			focus = focus.GetTiledFocus() if focus.IsFloating() else focus.FindParentLayout(chamfer.layout.VSPLIT).GetNext().GetFocusDescend();
 			focus.Focus();
 
-		elif keyId == Key.FOCUS_LEFT.value:
+		elif keyId == self.FOCUS_LEFT:
 			focus = focus.GetTiledFocus() if focus.IsFloating() else focus.FindParentLayout(chamfer.layout.VSPLIT).GetPrev().GetFocusDescend();
 			focus.Focus();
 
-		elif keyId == Key.FOCUS_DOWN.value:
+		elif keyId == self.FOCUS_DOWN:
 			focus = focus.GetTiledFocus() if focus.IsFloating() else focus.FindParentLayout(chamfer.layout.HSPLIT).GetNext().GetFocusDescend();
 			focus.Focus();
 
-		elif keyId == Key.FOCUS_UP.value:
+		elif keyId == self.FOCUS_UP:
 			focus = focus.GetTiledFocus() if focus.IsFloating() else focus.FindParentLayout(chamfer.layout.HSPLIT).GetPrev().GetFocusDescend();
 			focus.Focus();
 
-		elif keyId == Key.MOVE_RIGHT.value:
+		elif keyId == self.MOVE_RIGHT:
 			focus.MoveNext();
 
-		elif keyId == Key.MOVE_LEFT.value:
+		elif keyId == self.MOVE_LEFT:
 			focus.MovePrev();
 
-		elif keyId == Key.FOCUS_PARENT.value:
+		elif keyId == self.FOCUS_PARENT:
 			if parent is None:
 				return;
 			parent.Focus();
 
-		elif keyId == Key.FOCUS_CHILD.value:
+		elif keyId == self.FOCUS_CHILD:
 			focus = focus.GetFocus();
 			if focus is None:
 				return;
 			focus.Focus();
 
-		elif keyId == Key.FOCUS_MRU.value:
+		elif keyId == self.FOCUS_MRU:
 			try:
 				self.shiftFocus.shaderFlags &= ~ShaderFlag.FOCUS_NEXT.value;
 			except AttributeError:
@@ -392,7 +350,7 @@ class Backend(chamfer.Backend):
 
 			self.GrabKeyboard(True);
 
-		elif keyId == Key.FOCUS_FLOAT.value:
+		elif keyId == self.FOCUS_FLOAT:
 			try:
 				self.shiftFocus.shaderFlags &= ~ShaderFlag.FOCUS_NEXT.value;
 			except AttributeError:
@@ -409,11 +367,11 @@ class Backend(chamfer.Backend):
 
 			self.GrabKeyboard(True);
 
-		elif keyId == Key.FOCUS_FLOAT_PREV.value:
+		elif keyId == self.FOCUS_FLOAT_PREV:
 			#TODO, get previous from the focus history
 			pass;
 
-		elif keyId == Key.FOCUS_PARENT_RIGHT.value:
+		elif keyId == self.FOCUS_PARENT_RIGHT:
 			if parent is None:
 				return;
 			parent1 = parent.GetNext();
@@ -422,7 +380,7 @@ class Backend(chamfer.Backend):
 				return;
 			focus.Focus();
 			
-		elif keyId == Key.FOCUS_PARENT_LEFT.value:
+		elif keyId == self.FOCUS_PARENT_LEFT:
 			if parent is None:
 				return;
 			parent1 = parent.GetPrev();
@@ -431,18 +389,18 @@ class Backend(chamfer.Backend):
 				return;
 			focus.Focus();
 			
-		elif keyId == Key.YANK_CONTAINER.value:
+		elif keyId == self.YANK_CONTAINER:
 			print("yanking container...",flush=True);
 			self.yank = {focus};
 
-		elif keyId == Key.YANK_APPEND_CONTAINER.value:
+		elif keyId == self.YANK_APPEND_CONTAINER:
 			print("yanking container (append)...",flush=True);
 			try:
 				self.yank.add(focus);
 			except AttributeError:
 				self.yank = {focus};
 
-		elif keyId == Key.PASTE_CONTAINER.value:
+		elif keyId == self.PASTE_CONTAINER:
 			print("pasting container...",flush=True);
 			try:
 				if focus in self.yank:
@@ -463,7 +421,7 @@ class Backend(chamfer.Backend):
 			except ValueError:
 				print("expired container.",flush=True);
 
-		elif keyId == Key.LIFT_CONTAINER.value:
+		elif keyId == self.LIFT_CONTAINER:
 			sibling = focus.GetNext();
 			peer = sibling.GetNext();
 			if peer is not focus:
@@ -475,7 +433,7 @@ class Backend(chamfer.Backend):
 					peer.Move(sibling);
 					peer = peer1;
 
-		elif keyId == Key.LAYOUT.value:
+		elif keyId == self.LAYOUT:
 			if parent is None:
 				return;
 			layout = {
@@ -484,20 +442,24 @@ class Backend(chamfer.Backend):
 			}[parent.layout];
 			parent.ShiftLayout(layout);
 
-		elif keyId == Key.SPLIT_V.value:
-			#TODO: add render flags property, bitwise OR them
-			focus.splitArmed = not focus.splitArmed;
+		elif keyId == self.SPLIT_V:
+			try:
+				#Indicate that next time a container is created,
+				#the current focus will be split.
+				focus.splitArmed = not focus.splitArmed;
+			except AttributeError:
+				focus.splitArmed = True;
 
-		elif keyId == Key.FULLSCREEN.value:
+		elif keyId == self.FULLSCREEN:
 			print("setting fullscreen",flush=True);
 			focus.SetFullscreen(not focus.fullscreen);
 
-		elif keyId == Key.STACK.value:
+		elif keyId == self.STACK:
 			if parent is None:
 				return;
 			parent.SetStacked(not parent.stacked);
 
-		elif keyId == Key.STACK_RIGHT.value:
+		elif keyId == self.STACK_RIGHT:
 			container = focus.FindParentLayout(chamfer.layout.VSPLIT).GetNext();
 			if container is focus:
 				return;
@@ -507,7 +469,7 @@ class Backend(chamfer.Backend):
 			parent1.SetStacked(True);
 			parent1.ShiftLayout(chamfer.layout.HSPLIT);
 
-		elif keyId == Key.STACK_LEFT.value:
+		elif keyId == self.STACK_LEFT:
 			container = focus.FindParentLayout(chamfer.layout.VSPLIT).GetPrev();
 			if container is focus:
 				return;
@@ -517,133 +479,150 @@ class Backend(chamfer.Backend):
 			parent1.SetStacked(True);
 			parent1.ShiftLayout(chamfer.layout.HSPLIT);
 
-		elif keyId == Key.FLOAT.value:
-			#
+		elif keyId == self.FLOAT:
 			focus.SetFloating(True);
 		
-		elif keyId == Key.CONTRACT_ROOT_RESET.value:
+		elif keyId == self.CONTRACT_ROOT_RESET:
 			root = self.GetRoot();
 			root.canvasOffset = (0.0,0.0);
 			root.canvasExtent = (0.0,0.0);
 			root.ShiftLayout(root.layout);
 
-		elif keyId == Key.CONTRACT_ROOT_LEFT.value:
+		elif keyId == self.CONTRACT_ROOT_LEFT:
 			root = self.GetRoot();
 			root.canvasOffset = (root.canvasOffset[0]+0.1,root.canvasOffset[1]);
 			root.canvasExtent = (root.canvasExtent[0]+0.1,root.canvasExtent[1]);#root.canvasOffset;
 			root.ShiftLayout(root.layout);
 
-		elif keyId == Key.CONTRACT_ROOT_RIGHT.value:
+		elif keyId == self.CONTRACT_ROOT_RIGHT:
 			root = self.GetRoot();
 			root.canvasExtent = (root.canvasExtent[0]+0.1,root.canvasExtent[1]);
 			root.ShiftLayout(root.layout);
 
-		elif keyId == Key.EXPAND_ROOT_LEFT.value:
+		elif keyId == self.EXPAND_ROOT_LEFT:
 			root = self.GetRoot();
 			root.canvasOffset = (root.canvasOffset[0]-0.1,root.canvasOffset[1]);
 			root.canvasExtent = (root.canvasExtent[0]-0.1,root.canvasExtent[1]);
 			root.ShiftLayout(root.layout);
 
-		elif keyId == Key.EXPAND_ROOT_RIGHT.value:
+		elif keyId == self.EXPAND_ROOT_RIGHT:
 			root = self.GetRoot();
 			root.canvasExtent = (root.canvasExtent[0]-0.1,root.canvasExtent[1]);
 			root.ShiftLayout(root.layout);
 
-		elif keyId == Key.CONTRACT_RESET.value:
+		elif keyId == self.CONTRACT_RESET:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.canvasOffset = (0.0,0.0);
 			container.canvasExtent = (0.0,0.0);
 			container.ShiftLayout(container.layout);
 
-		elif keyId == Key.CONTRACT_HORIZONTAL.value:
+		elif keyId == self.CONTRACT_HORIZONTAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.size = (container.size[0]-0.1,container.size[1]);
 
-		elif keyId == Key.CONTRACT_HORIZONTAL_LOCAL.value:
+		elif keyId == self.CONTRACT_HORIZONTAL_LOCAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.canvasOffset = (container.canvasOffset[0]+0.05,container.canvasOffset[1]);
 			container.canvasExtent = (container.canvasExtent[0]+0.10,container.canvasExtent[1]);
 			container.ShiftLayout(container.layout);
 
-		elif keyId == Key.CONTRACT_VERTICAL.value:
+		elif keyId == self.CONTRACT_VERTICAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.size = (container.size[0],container.size[1]-0.1);
 
-		elif keyId == Key.CONTRACT_VERTICAL_LOCAL.value:
+		elif keyId == self.CONTRACT_VERTICAL_LOCAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.canvasOffset = (container.canvasOffset[0],container.canvasOffset[1]+0.05);
 			container.canvasExtent = (container.canvasExtent[0],container.canvasExtent[1]+0.10);
 			container.ShiftLayout(container.layout);
 
-		elif keyId in [Key.WORKSPACE_1.value,Key.WORKSPACE_2.value,Key.WORKSPACE_3.value,Key.WORKSPACE_4.value]:
-			wsName = str(keyId-Key.WORKSPACE_1.value+1);
+		elif keyId in [self.WORKSPACE_1,self.WORKSPACE_2,self.WORKSPACE_3,self.WORKSPACE_4]:
+			#add more workspaces by defining more WORKSPACE_*
+			wsName = str(keyId-self.WORKSPACE_1+1);
 			root = self.GetRoot(wsName);
 			root.GetFocusDescend = Container.GetFocusDescend.__get__(root); #RootContainer does not have GetFocusDescend, so we will add it now
 			root.GetFocusDescend().Focus();
 
-		elif keyId == Key.WORKSPACE_NOCOMP.value:
+		elif keyId == self.WORKSPACE_NOCOMP:
 			root = self.GetRoot("nocomp");
 			root.GetFocusDescend = Container.GetFocusDescend.__get__(root);
 			root.GetFocusDescend().Focus();
 
-		elif keyId == Key.EXPAND_HORIZONTAL.value:
+		elif keyId == self.EXPAND_HORIZONTAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.size = (container.size[0]+0.1,container.size[1]);
 
-		elif keyId == Key.EXPAND_HORIZONTAL_LOCAL.value:
+		elif keyId == self.EXPAND_HORIZONTAL_LOCAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.canvasOffset = (container.canvasOffset[0]-0.05,container.canvasOffset[1]);
 			container.canvasExtent = (container.canvasExtent[0]-0.10,container.canvasExtent[1]);
 			container.ShiftLayout(container.layout);
 
-		elif keyId == Key.EXPAND_VERTICAL.value:
+		elif keyId == self.EXPAND_VERTICAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.size = (container.size[0],container.size[1]+0.1);
 
-		elif keyId == Key.EXPAND_VERTICAL_LOCAL.value:
+		elif keyId == self.EXPAND_VERTICAL_LOCAL:
 			container = parent if (parent is not None) and parent.stacked else focus;
 			container.canvasOffset = (container.canvasOffset[0],container.canvasOffset[1]-0.05);
 			container.canvasExtent = (container.canvasExtent[0],container.canvasExtent[1]-0.10);
 			container.ShiftLayout(container.layout);
 
-		elif keyId == Key.KILL.value:
+		elif keyId == self.KILL:
 			focus.Kill();
 
-		elif keyId == Key.LAUNCH_TERMINAL.value:
-			psutil.Popen(["termite"],stdout=None,stderr=None);
+		elif keyId == self.LAUNCH_TERMINAL:
+			for t in [os.getenv("TERMINAL"),"alacritty","kitty","urxvt","rxvt","st","xterm"]:
+				try:
+					psutil.Popen([t],stdout=None,stderr=None);
+					break;
+				except (TypeError,FileNotFoundError):
+					pass;
 
-		elif keyId == Key.LAUNCH_BROWSER.value:
+		elif keyId == self.LAUNCH_BROWSER:
 			psutil.Popen(["firefox"],stdout=None,stderr=None);
 
-		elif keyId == Key.LAUNCH_BROWSER_PRIVATE.value:
+		elif keyId == self.LAUNCH_BROWSER_PRIVATE:
 			psutil.Popen(["firefox","--private-window"],stdout=None,stderr=None);
 
-		elif keyId == Key.AUDIO_VOLUME_MUTE.value:
+		elif keyId == self.AUDIO_VOLUME_MUTE:
 			if "pulsectl" in sys.modules:
-				with pulsectl.Pulse('volume-increaser') as pulse:
+				with pulsectl.Pulse('chamferwm') as pulse:
+					defSinkName = pulse.server_info().default_sink_name;
 					for sink in pulse.sink_list():
-						pulse.mute(sink,not sink.mute);
+						if sink.name == defSinkName:
+							pulse.mute(sink,not sink.mute);
+							break;
 
-		elif keyId == Key.AUDIO_VOLUME_UP.value:
+		elif keyId == self.AUDIO_VOLUME_UP:
 			if "pulsectl" in sys.modules:
-				with pulsectl.Pulse('volume-increaser') as pulse:
+				with pulsectl.Pulse('chamferwm') as pulse:
+					defSinkName = pulse.server_info().default_sink_name;
 					for sink in pulse.sink_list():
-						pulse.volume_change_all_chans(sink,0.05);
+						if sink.name == defSinkName:
+							pulse.volume_change_all_chans(sink,0.05);
+							break;
 
-		elif keyId == Key.AUDIO_VOLUME_DOWN.value:
+		elif keyId == self.AUDIO_VOLUME_DOWN:
 			if "pulsectl" in sys.modules:
-				with pulsectl.Pulse('volume-increaser') as pulse:
+				with pulsectl.Pulse('chamferwm') as pulse:
+					defSinkName = pulse.server_info().default_sink_name;
 					for sink in pulse.sink_list():
-						pulse.volume_change_all_chans(sink,-0.05);
+						if sink.name == defSinkName:
+							pulse.volume_change_all_chans(sink,-0.05);
+							break;
 
-		elif keyId == Key.MONITOR_BRIGHTNESS_UP.value:
+		elif keyId == self.SCREENSHOT:
+			psutil.Popen(["sh","-c","import png:- | xclip -selection clipboard -t image/png"]);
+
+		elif keyId == self.MONITOR_BRIGHTNESS_UP:
 			psutil.Popen(["xbacklight","-inc","20"]);
 
-		elif keyId == Key.MONITOR_BRIGHTNESS_DOWN.value:
+		elif keyId == self.MONITOR_BRIGHTNESS_DOWN:
 			psutil.Popen(["xbacklight","-dec","20"]);
 
 	def OnKeyRelease(self, keyId):
-		if keyId == Key.MODIFIER_1.value or keyId == Key.MODIFIER_4.value:
+		if keyId == self.MODIFIER_1 or keyId == self.MODIFIER_4:
 			self.GrabKeyboard(False);
 			try:
 				self.shiftFocus.shaderFlags &= ~ShaderFlag.FOCUS_NEXT.value;
@@ -653,66 +632,61 @@ class Backend(chamfer.Backend):
 	
 			self.shiftFocus = None;
 
-	def OnTimer(self):
-		battery = psutil.sensors_battery();
-		try:
-			if not battery.power_plugged:
-				self.batteryFullNotified = False;
-				if battery.percent <= 5 and self.batteryAlarmLevel < 3:
-					psutil.Popen(["dunstify","--urgency=2","-p","100","Battery below 5%"]);
-					self.batteryAlarmLevel = 3;
-				elif battery.percent <= 10 and self.batteryAlarmLevel < 2:
-					psutil.Popen(["dunstify","--urgency=2","-p","100","Battery below 10%"]);
-					self.batteryAlarmLevel = 2;
-				elif battery.percent <= 15 and self.batteryAlarmLevel < 1:
-					psutil.Popen(["dunstify","--urgency=2","-p","100","Battery below 15%"]);
-					self.batteryAlarmLevel = 1;
-			else:
-				self.batteryAlarmLevel = 0;
-				if battery.percent >= 99 and not self.batteryFullNotified:
-					psutil.Popen(["dunstify","--urgency=0","-p","100","Battery full"]);
-					self.batteryFullNotified = True;
-		except AttributeError:
-			self.batteryFullNotified = True;
-			self.batteryAlarmLevel = 0;
-
 class Compositor(chamfer.Compositor):
-	pass
+	def OnRedirectExternal(self, title, className):
+		#Used only in standalone compositor mode. Return False to filter out incompatible WM/UI components.
+		return True;
 
 backend = Backend();
 chamfer.BindBackend(backend);
 
+if not backend.standaloneCompositor:
+	#Import some modules for WM use
+	try:
+		import psutil
+	except ModuleNotFoundError:
+		print("No psutil module.");
+
+	try:
+		from Xlib.keysymdef import latin1,miscellany,xf86
+		from Xlib import XK
+	except ModuleNotFoundError:
+		print("No Xlib module.");
+
+	try:
+		import pulsectl
+	except ModuleNotFoundError:
+		print("No pulsectl module.");
+
 compositor = Compositor();
 #compositor.deviceIndex = 0;
 compositor.fontName = "Monospace";
-compositor.fontSize = 32;
+compositor.fontSize = 24;
+compositor.enableAnimation = True;
 chamfer.BindCompositor(compositor);
 
-pids = psutil.pids();
-pnames = [psutil.Process(pid).name() for pid in pids];
-pcmdls = [a for p in [psutil.Process(pid).cmdline() for pid in pids] for a in p];
+if not backend.standaloneCompositor:
+	#Acquire list of running processes to not launch something that is already running.
+	pids = psutil.pids();
+	pnames = [psutil.Process(pid).name() for pid in pids];
+	pcmdls = [a for p in [psutil.Process(pid).cmdline() for pid in pids] for a in p];
 
-#---set wallpaper with feh
-#psutil.Popen(["feh","--no-fehbg","--image-bg","black","--bg-center","background.png"]);
+	#---set wallpaper with feh
+	#psutil.Popen(["feh","--no-fehbg","--image-bg","black","--bg-center","background.png"]);
 
-#---startup programs examples:
-#launch pulseaudio if installed
-#if not "pulseaudio" in pnames:
-#	print("starting pulseaudio...");
-#	psutil.Popen(["sleep 1.0; pulseaudio --start"],shell=True,stdout=None,stderr=None);
+	#---startup programs examples:
+	#launch notification system
+	#if not "dunst" in pnames:
+	#	print("starting dunst...");
+	#	psutil.Popen(["dunst"],stdout=None,stderr=None);
 
-#launch notification system
-#if not "dunst" in pnames:
-#	print("starting dunst...");
-#	psutil.Popen(["dunst"],stdout=None,stderr=None);
+	#launch clipboard manager
+	#if not any(["clipster" in p for p in pcmdls]):
+	#	print("starting clipster..."); #clipboard manager
+	#	psutil.Popen(["clipster","-d"],stdout=None,stderr=None);
 
-#launch clipboard manager
-#if not any(["clipster" in p for p in pcmdls]):
-#	print("starting clipster..."); #clipboard manager
-#	psutil.Popen(["clipster","-d"],stdout=None,stderr=None);
-
-#launch gestures daemon for touch devices
-#if not any(["libinput-gestures" in p for p in pcmdls]):
-#	print("starting libinput-gestures..."); #touchpad gestures
-#	psutil.Popen(["libinput-gestures-setup","start"],stdout=None,stderr=None);
+	#launch gestures daemon for touch devices
+	#if not any(["libinput-gestures" in p for p in pcmdls]):
+	#	print("starting libinput-gestures..."); #touchpad gestures
+	#	psutil.Popen(["libinput-gestures-setup","start"],stdout=None,stderr=None);
 

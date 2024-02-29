@@ -18,6 +18,7 @@ minSize(boost::python::make_tuple(0.0f,0.0f)),
 maxSize(boost::python::make_tuple(1.0f,1.0f)),
 floatingMode(FLOAT_AUTOMATIC),
 titleBar(WManager::Container::TITLEBAR_NONE),
+titleStackOnly(false),
 shaderUserFlags(0),
 pcontainer(0){
 	//
@@ -46,6 +47,7 @@ void ContainerInterface::CopySettingsSetup(WManager::Container::Setup &setup){
 	setup.maxSize.x = boost::python::extract<float>(maxSize[0])();
 	setup.maxSize.y = boost::python::extract<float>(maxSize[1])();
 	setup.titleBar = titleBar;
+	setup.titleStackOnly = titleStackOnly;
 }
 
 void ContainerInterface::DeferredPropertyTransfer(){
@@ -423,24 +425,6 @@ ContainerConfig::~ContainerConfig(){
 	pcontainerInt->pcontainer = 0;
 }
 
-/*template<typename T>
-BackendContainerConfig<T>::BackendContainerConfig(ContainerInterface *_pcontainerInt, WManager::Container *_pParent, const WManager::Container::Setup &_setup, Backend::X11Backend *_pbackend) : T(_pParent,_setup,_pbackend), ContainerConfig(_pcontainerInt){
-	//
-}
-
-template<typename T>
-BackendContainerConfig<T>::BackendContainerConfig(Backend::X11Backend *_pbackend) : T(_pbackend), ContainerConfig(){
-	//
-	pcontainerInt->pcontainer = this;
-}
-
-template<typename T>
-BackendContainerConfig<T>::~BackendContainerConfig(){
-	//
-}
-
-class template BackendContainerConfig<Backend::X11Container>;*/
-
 X11ContainerConfig::X11ContainerConfig(ContainerInterface *_pcontainerInt, WManager::Container *_pParent, const WManager::Container::Setup &_setup, Backend::X11Backend *_pbackend) : Backend::X11Container(_pParent,_setup,_pbackend), ContainerConfig(_pcontainerInt,_pbackend){
 	//
 }
@@ -483,7 +467,7 @@ WorkspaceProxy::~WorkspaceProxy(){
 	//
 }*/
 
-BackendInterface::BackendInterface() : pbackend(0){
+BackendInterface::BackendInterface() : standaloneComp(Loader::standaloneComp), pbackend(0){
 	//
 }
 
@@ -699,12 +683,16 @@ BackendConfig::~BackendConfig(){
 	pbackendInt->pbackend = 0;
 }
 
-CompositorInterface::CompositorInterface() : deviceIndex(Loader::deviceIndex), debugLayers(Loader::debugLayers), scissoring(Loader::scissoring), hostMemoryImport(Loader::hostMemoryImport), unredirOnFullscreen(Loader::unredirOnFullscreen), enableAnimation(true), animationDuration(0.3f), fontName("Monospace"), fontSize(18), pcompositor(0){
+CompositorInterface::CompositorInterface() : noCompositor(Loader::noCompositor), deviceIndex(Loader::deviceIndex), debugLayers(Loader::debugLayers), scissoring(Loader::scissoring), incrementalPresent(Loader::incrementalPresent), memoryImportMode(Loader::memoryImportMode), unredirOnFullscreen(Loader::unredirOnFullscreen), enableAnimation(true), animationDuration(0.3f), fontName("Monospace"), fontSize(18), pcompositor(0){
 	//
 }
 
 CompositorInterface::~CompositorInterface(){
 	//
+}
+
+bool CompositorInterface::OnRedirectExternal(std::string title, std::string className){
+	return true;
 }
 
 void CompositorInterface::Bind(boost::python::object obj){
@@ -722,6 +710,21 @@ CompositorProxy::CompositorProxy(){
 
 CompositorProxy::~CompositorProxy(){
 	//
+}
+
+bool CompositorProxy::OnRedirectExternal(std::string title, std::string className){
+	boost::python::override ovr = this->get_override("OnRedirectExternal");
+	if(ovr){
+		try{
+			return ovr(title,className);
+		}catch(boost::python::error_already_set &){
+			PyErr_Print();
+			//
+			boost::python::handle_exception();
+			PyErr_Clear();
+		}
+	}
+	return CompositorInterface::OnRedirectExternal(title,className);
 }
 
 CompositorConfig::CompositorConfig(CompositorInterface *_pcompositorInt) : pcompositorInt(_pcompositorInt){
@@ -794,13 +797,13 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!container.pcontainer)
 					return;
 				container.pcontainer->MoveNext();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<void, ContainerInterface &>()))
 		.def("MovePrev",boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer)
 					return;
 				container.pcontainer->MovePrev();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<void, ContainerInterface &>()))
 		.def("Move",&ContainerInterface::Move)
 		.def("Focus",boost::python::make_function(
 			[](ContainerInterface &container){
@@ -808,36 +811,36 @@ BOOST_PYTHON_MODULE(chamfer){
 					return;
 				if(container.OnFocus())
 					container.pcontainer->Focus();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<void, ContainerInterface &>()))
 		.def("Kill",boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer)
 					return;
 				if(container.pcontainer->pclient)
 					container.pcontainer->pclient->Kill();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<void, ContainerInterface &>()))
 		.def("ShiftLayout",boost::python::make_function(
 			[](ContainerInterface &container, WManager::Container::LAYOUT layout){
 				if(!container.pcontainer)
 					return;
 				container.pcontainer->SetLayout(layout);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, WManager::Container::LAYOUT>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, WManager::Container::LAYOUT>()))
 		.def("SetFullscreen",boost::python::make_function(
 			[](ContainerInterface &container, bool toggle){
 				if(!container.pcontainer)
 					return;
 				if(container.OnFullscreen(toggle))
 					container.pcontainer->SetFullscreen(toggle);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, bool>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, bool>()))
 		.def("SetStacked",boost::python::make_function(
 			[](ContainerInterface &container, bool toggle){
 				if(!container.pcontainer)
 					return;
 				container.OnStack(toggle);
 				container.pcontainer->SetStacked(toggle);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, bool>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, bool>()))
 		.def("SetFloating",boost::python::make_function(
-			[](ContainerInterface &container, bool toggle){
+			[](ContainerInterface &container, bool toggle){ //XXX toggle does nothing here!
 				if(!container.pcontainer)
 					return;
 				container.OnFloat(toggle);
@@ -845,7 +848,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(pcontainer1)
 					pcontainer1->pbackend->FloatContainer(container.pcontainer);
 				//container.pcontainer->SetStacked(toggle);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, bool>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, bool>()))
 		.def("IsFloating",boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer){
@@ -853,11 +856,11 @@ BOOST_PYTHON_MODULE(chamfer){
 					return false;
 				}
 				return (container.pcontainer->flags & WManager::Container::FLAG_FLOATING) != 0;
-			},boost::python::default_call_policies(),boost::mpl::vector<bool, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<bool, ContainerInterface &>()))
 		.def("IsAlive",boost::python::make_function(
 			[](ContainerInterface &container){
 				return container.pcontainer != 0;
-			},boost::python::default_call_policies(),boost::mpl::vector<bool, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<bool, ContainerInterface &>()))
 		//.def_readwrite("canvasOffset",&ContainerInterface::canvasOffset)
 		.add_property("name",
 			boost::python::make_function(
@@ -865,7 +868,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!container.pcontainer || !container.pcontainer->pname)
 					return container.name;
 				return std::string(container.pcontainer->pname);
-			},boost::python::default_call_policies(),boost::mpl::vector<std::string, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<std::string, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, std::string name){
 				container.name = name;
@@ -873,14 +876,14 @@ BOOST_PYTHON_MODULE(chamfer){
 					container.pcontainer->SetName(name.c_str());
 					return;
 				}
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, std::string>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, std::string>()))
 		.add_property("canvasOffset",
 			boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer)
 					return container.canvasOffset;
 				return boost::python::make_tuple(container.pcontainer->canvasOffset.x,container.pcontainer->canvasOffset.y);
-			},boost::python::default_call_policies(),boost::mpl::vector<boost::python::tuple, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<boost::python::tuple, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, boost::python::tuple tuple){
 				if(!container.pcontainer){
@@ -889,7 +892,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				}
 				container.pcontainer->canvasOffset.x = boost::python::extract<float>(tuple[0])();
 				container.pcontainer->canvasOffset.y = boost::python::extract<float>(tuple[1])();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, boost::python::tuple>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, boost::python::tuple>()))
 		//.def_readwrite("canvasExtent",&ContainerInterface::canvasExtent)
 		.add_property("canvasExtent",
 			boost::python::make_function(
@@ -897,7 +900,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!container.pcontainer)
 					return container.canvasExtent;
 				return boost::python::make_tuple(container.pcontainer->canvasExtent.x,container.pcontainer->canvasExtent.y);
-			},boost::python::default_call_policies(),boost::mpl::vector<boost::python::tuple, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<boost::python::tuple, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, boost::python::tuple tuple){
 				if(!container.pcontainer){
@@ -906,7 +909,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				}
 				container.pcontainer->canvasExtent.x = boost::python::extract<float>(tuple[0])();
 				container.pcontainer->canvasExtent.y = boost::python::extract<float>(tuple[1])();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, boost::python::tuple>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, boost::python::tuple>()))
 		//.def_readwrite("margin",&ContainerInterface::margin)
 		.add_property("margin",
 			boost::python::make_function(
@@ -914,7 +917,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!container.pcontainer)
 					return container.margin;
 				return boost::python::make_tuple(container.pcontainer->margin.x,container.pcontainer->margin.y);
-			},boost::python::default_call_policies(),boost::mpl::vector<boost::python::tuple, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<boost::python::tuple, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, boost::python::tuple tuple){
 				if(!container.pcontainer){
@@ -923,7 +926,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				}
 				container.pcontainer->margin.x = boost::python::extract<float>(tuple[0])();
 				container.pcontainer->margin.y = boost::python::extract<float>(tuple[1])();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, boost::python::tuple>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, boost::python::tuple>()))
 		.add_property("borderWidth",
 			boost::python::make_function(
 			[](ContainerInterface &container){
@@ -931,7 +934,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!container.pcontainer)
 					return container.margin;
 				return boost::python::make_tuple(container.pcontainer->margin.x,container.pcontainer->margin.y);
-			},boost::python::default_call_policies(),boost::mpl::vector<boost::python::tuple, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<boost::python::tuple, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, boost::python::tuple tuple){
 				DebugPrintf(stdout,"depcrecation warning: borderWidth - use 'margin'.\n");
@@ -941,14 +944,14 @@ BOOST_PYTHON_MODULE(chamfer){
 				}
 				container.pcontainer->margin.x = boost::python::extract<float>(tuple[0])();
 				container.pcontainer->margin.y = boost::python::extract<float>(tuple[1])();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, boost::python::tuple>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, boost::python::tuple>()))
 		.add_property("size",
 			boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer)
 					return container.size;
 				return boost::python::make_tuple(container.pcontainer->size.x,container.pcontainer->size.y);
-			},boost::python::default_call_policies(),boost::mpl::vector<boost::python::tuple, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<boost::python::tuple, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, boost::python::tuple tuple){
 				if(!container.pcontainer){
@@ -959,14 +962,14 @@ BOOST_PYTHON_MODULE(chamfer){
 					boost::python::extract<float>(tuple[0])(),
 					boost::python::extract<float>(tuple[1])());
 				container.pcontainer->SetSize(size);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, boost::python::tuple>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, boost::python::tuple>()))
 		.add_property("minSize",
 			boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer)
 					return container.minSize;
 				return boost::python::make_tuple(container.pcontainer->minSize.x,container.pcontainer->minSize.y);
-			},boost::python::default_call_policies(),boost::mpl::vector<boost::python::tuple, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<boost::python::tuple, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, boost::python::tuple tuple){
 				if(!container.pcontainer){
@@ -975,7 +978,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				}
 				container.pcontainer->minSize.x = boost::python::extract<float>(tuple[0])();
 				container.pcontainer->minSize.y = boost::python::extract<float>(tuple[1])();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, boost::python::tuple>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, boost::python::tuple>()))
 		//.def_readwrite("maxSize",&ContainerInterface::maxSize)
 		.add_property("maxSize",
 			boost::python::make_function(
@@ -983,7 +986,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!container.pcontainer)
 					return container.maxSize;
 				return boost::python::make_tuple(container.pcontainer->maxSize.x,container.pcontainer->maxSize.y);
-			},boost::python::default_call_policies(),boost::mpl::vector<boost::python::tuple, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<boost::python::tuple, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, boost::python::tuple tuple){
 				if(!container.pcontainer){
@@ -992,7 +995,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				}
 				container.pcontainer->maxSize.x = boost::python::extract<float>(tuple[0])();
 				container.pcontainer->maxSize.y = boost::python::extract<float>(tuple[1])();
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, boost::python::tuple>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, boost::python::tuple>()))
 		.add_property("fullscreen",boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer){
@@ -1000,7 +1003,7 @@ BOOST_PYTHON_MODULE(chamfer){
 					return false;
 				}
 				return (container.pcontainer->flags & WManager::Container::FLAG_FULLSCREEN) != 0;
-			},boost::python::default_call_policies(),boost::mpl::vector<bool, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<bool, ContainerInterface &>()))
 		.add_property("stacked",boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer){
@@ -1008,7 +1011,7 @@ BOOST_PYTHON_MODULE(chamfer){
 					return false;
 				}
 				return (container.pcontainer->flags & WManager::Container::FLAG_STACKED) != 0;
-			},boost::python::default_call_policies(),boost::mpl::vector<bool, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<bool, ContainerInterface &>()))
 		.add_property("titleBar",boost::python::make_function(
 			// = NONE, LEFT, TOP, RIGHT, BOTTOM
 			//location, size (or use common font size)?
@@ -1016,7 +1019,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!container.pcontainer)
 					return WManager::Container::TITLEBAR_NONE;
 				return container.pcontainer->titleBar;
-			},boost::python::default_call_policies(),boost::mpl::vector<WManager::Container::TITLEBAR, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<WManager::Container::TITLEBAR, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, WManager::Container::TITLEBAR titleBar){
 				if(!container.pcontainer){
@@ -1024,7 +1027,21 @@ BOOST_PYTHON_MODULE(chamfer){
 					return;
 				}
 				container.pcontainer->SetTitlebar(titleBar);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, WManager::Container::TITLEBAR>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, WManager::Container::TITLEBAR>()))
+		.add_property("titleStackOnly",boost::python::make_function(
+			[](ContainerInterface &container){
+				if(!container.pcontainer)
+					return false;
+				return container.pcontainer->titleStackOnly;
+			},boost::python::default_call_policies(),boost::mpl::vector2<bool, ContainerInterface &>()),
+			boost::python::make_function(
+			[](ContainerInterface &container, bool titleStackOnly){
+				if(!container.pcontainer){
+					container.titleStackOnly = titleStackOnly;
+					return;
+				}
+				container.pcontainer->titleStackOnly = titleStackOnly;
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, bool>()))
 		.add_property("shaderFlags",
 			boost::python::make_function(
 			[](ContainerInterface &container){
@@ -1034,7 +1051,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!pclientFrame)
 					return container.shaderUserFlags;
 				return pclientFrame->shaderUserFlags;
-			},boost::python::default_call_policies(),boost::mpl::vector<uint, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<uint, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, uint flags){
 				if(!container.pcontainer){
@@ -1047,7 +1064,7 @@ BOOST_PYTHON_MODULE(chamfer){
 					return;
 				}
 				pclientFrame->shaderUserFlags = flags;
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, uint>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, uint>()))
 		.def_readonly("wm_name",&ContainerInterface::wm_name)
 		.def_readonly("wm_class",&ContainerInterface::wm_class)
 		//.def_readwrite("vertexShader",&ContainerInterface::vertexShader)
@@ -1055,37 +1072,37 @@ BOOST_PYTHON_MODULE(chamfer){
 			boost::python::make_function(
 			[](ContainerInterface &container){
 				return container.vertexShader;
-			},boost::python::default_call_policies(),boost::mpl::vector<std::string, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<std::string, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, std::string vertexShader){
 				container.vertexShader = vertexShader;
 				if(container.pcontainer && container.pcontainer->pclient){
 					ContainerInterface::shaderUpdateQueue.insert(&container);}
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, std::string>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, std::string>()))
 		//.def_readwrite("geometryShader",&ContainerInterface::geometryShader)
 		.add_property("geometryShader",
 			boost::python::make_function(
 			[](ContainerInterface &container){
 				return container.geometryShader;
-			},boost::python::default_call_policies(),boost::mpl::vector<std::string, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<std::string, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, std::string geometryShader){
 				container.geometryShader = geometryShader;
 				if(container.pcontainer && container.pcontainer->pclient)
 					ContainerInterface::shaderUpdateQueue.insert(&container);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, std::string>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, std::string>()))
 		//.def_readwrite("fragmentShader",&ContainerInterface::fragmentShader)
 		.add_property("fragmentShader",
 			boost::python::make_function(
 			[](ContainerInterface &container){
 				return container.fragmentShader;
-			},boost::python::default_call_policies(),boost::mpl::vector<std::string, ContainerInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<std::string, ContainerInterface &>()),
 			boost::python::make_function(
 			[](ContainerInterface &container, std::string fragmentShader){
 				container.fragmentShader = fragmentShader;
 				if(container.pcontainer && container.pcontainer->pclient)
 					ContainerInterface::shaderUpdateQueue.insert(&container);
-			},boost::python::default_call_policies(),boost::mpl::vector<void, ContainerInterface &, std::string>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, ContainerInterface &, std::string>()))
 		.add_property("layout",boost::python::make_function(
 			[](ContainerInterface &container){
 				if(!container.pcontainer){
@@ -1093,7 +1110,7 @@ BOOST_PYTHON_MODULE(chamfer){
 					return WManager::Container::LAYOUT_VSPLIT;
 				}
 				return container.pcontainer->layout;
-			},boost::python::default_call_policies(),boost::mpl::vector<WManager::Container::LAYOUT, ContainerInterface &>()))
+			},boost::python::default_call_policies(),boost::mpl::vector2<WManager::Container::LAYOUT, ContainerInterface &>()))
 		.def_readwrite("floatingMode",&ContainerInterface::floatingMode)
 		;
 	
@@ -1115,6 +1132,7 @@ BOOST_PYTHON_MODULE(chamfer){
 		.def("BindKey",&BackendInterface::BindKey)
 		.def("MapKey",&BackendInterface::MapKey)
 		.def("GrabKeyboard",&BackendInterface::GrabKeyboard)
+		.def_readwrite("standaloneCompositor",&BackendInterface::standaloneComp)
 		;
 	boost::python::def("BindBackend",BackendInterface::Bind);
 
@@ -1123,12 +1141,21 @@ BOOST_PYTHON_MODULE(chamfer){
 		.value("FLOATING",Compositor::ClientFrame::SHADER_FLAG_FLOATING)
 		.value("STACKED",Compositor::ClientFrame::SHADER_FLAG_STACKED)
 		.value("USER_BIT",Compositor::ClientFrame::SHADER_FLAG_USER_BIT);
+
+	boost::python::enum_<Compositor::CompositorInterface::IMPORT_MODE>("importMode")
+		.value("CPU_COPY",Compositor::CompositorInterface::IMPORT_MODE_CPU_COPY)
+		.value("HOST_MEMORY",Compositor::CompositorInterface::IMPORT_MODE_HOST_MEMORY)
+		.value("DMABUF",Compositor::CompositorInterface::IMPORT_MODE_DMABUF);
 	
 	boost::python::class_<CompositorProxy,boost::noncopyable>("Compositor")
+		.def("OnRedirectExternal",&CompositorInterface::OnRedirectExternal)
+		.def_readwrite("noCompositor",&CompositorInterface::noCompositor)
 		.def_readwrite("deviceIndex",&CompositorInterface::deviceIndex)
 		.def_readwrite("debugLayers",&CompositorInterface::debugLayers)
 		.def_readwrite("scissoring",&CompositorInterface::scissoring)
-		.def_readwrite("hostMemoryImport",&CompositorInterface::hostMemoryImport)
+		.def_readwrite("incrementalPresent",&CompositorInterface::incrementalPresent)
+		//.def_readwrite("hostMemoryImport",&CompositorInterface::hostMemoryImport)
+		.def_readwrite("memoryImportMode",&CompositorInterface::memoryImportMode)
 		.def_readwrite("unredirOnFullscreen",&CompositorInterface::unredirOnFullscreen)
 		.add_property("enableAnimation",
 			boost::python::make_function(
@@ -1136,7 +1163,7 @@ BOOST_PYTHON_MODULE(chamfer){
 				if(!compositor.pcompositor)
 					return compositor.enableAnimation;
 				return dynamic_cast<Compositor::CompositorInterface *>(compositor.pcompositor)->enableAnimation;
-			},boost::python::default_call_policies(),boost::mpl::vector<bool, CompositorInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<bool, CompositorInterface &>()),
 			boost::python::make_function(
 			[](CompositorInterface &compositor, bool enableAnimation){
 				if(!compositor.pcompositor){
@@ -1144,14 +1171,14 @@ BOOST_PYTHON_MODULE(chamfer){
 					return;
 				}
 				dynamic_cast<Compositor::CompositorInterface *>(compositor.pcompositor)->enableAnimation = enableAnimation;
-			},boost::python::default_call_policies(),boost::mpl::vector<void, CompositorInterface &, bool>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, CompositorInterface &, bool>()))
 		.add_property("animationDuration",
 			boost::python::make_function(
 			[](CompositorInterface &compositor){
 				if(!compositor.pcompositor)
 					return compositor.animationDuration;
 				return dynamic_cast<Compositor::CompositorInterface *>(compositor.pcompositor)->animationDuration;
-			},boost::python::default_call_policies(),boost::mpl::vector<float, CompositorInterface &>()),
+			},boost::python::default_call_policies(),boost::mpl::vector2<float, CompositorInterface &>()),
 			boost::python::make_function(
 			[](CompositorInterface &compositor, float animationDuration){
 				if(!compositor.pcompositor){
@@ -1159,7 +1186,7 @@ BOOST_PYTHON_MODULE(chamfer){
 					return;
 				}
 				dynamic_cast<Compositor::CompositorInterface *>(compositor.pcompositor)->animationDuration = animationDuration;
-			},boost::python::default_call_policies(),boost::mpl::vector<void, CompositorInterface &, float>()))
+			},boost::python::default_call_policies(),boost::mpl::vector3<void, CompositorInterface &, float>()))
 		.def_readwrite("fontName",&CompositorInterface::fontName)
 		.def_readwrite("fontSize",&CompositorInterface::fontSize)
 		;
@@ -1179,7 +1206,7 @@ Loader::~Loader(){
 	Py_Finalize();
 }
 
-void Loader::Run(const char *pfilePath, const char *pfileLabel){
+bool Loader::Run(const char *pfilePath, const char *pfileLabel){
 	FILE *pf = 0;
 	if(!pfilePath){
 		const char *pconfigPaths[] = {
@@ -1205,7 +1232,7 @@ void Loader::Run(const char *pfilePath, const char *pfileLabel){
 	}
 	if(!pf){
 		DebugPrintf(stderr,"Unable to find configuration file.\n");
-		return;
+		return false;
 	}
 	try{
 		PyRun_SimpleFile(pf,pfileLabel);
@@ -1213,14 +1240,23 @@ void Loader::Run(const char *pfilePath, const char *pfileLabel){
 	}catch(boost::python::error_already_set &){
 		boost::python::handle_exception();
 		PyErr_Clear();
+		fclose(pf);
+		return false;
 	}
 	fclose(pf);
+
+	return true;
 }
 
+bool Loader::standaloneComp;
+
+bool Loader::noCompositor;
 sint Loader::deviceIndex;
 bool Loader::debugLayers;
 bool Loader::scissoring;
-bool Loader::hostMemoryImport;
+bool Loader::incrementalPresent;
+//bool Loader::hostMemoryImport;
+Compositor::CompositorInterface::IMPORT_MODE Loader::memoryImportMode;
 bool Loader::unredirOnFullscreen;
 
 }

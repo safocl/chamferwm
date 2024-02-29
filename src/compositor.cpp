@@ -11,7 +11,6 @@
 #include <sys/shm.h>
 #include <boost/container_hash/hash.hpp>
 
-//#include <gbm.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -95,7 +94,7 @@ ColorFrame::~ColorFrame(){
 }
 
 void ColorFrame::Draw(const VkRect2D &frame, const glm::vec2 &margin, const glm::vec2 &titlePad, const glm::vec2 &titleSpan, uint stackIndex, uint flags, const VkCommandBuffer *pcommandBuffer){
-	time = timespec_diff(pcomp->frameTime,creationTime);
+	time = (float)timespec_diff(pcomp->frameTime,creationTime);
 
 	glm::vec2 imageExtent = glm::vec2(pcomp->imageExtent.width,pcomp->imageExtent.height);
 
@@ -136,13 +135,15 @@ void ClientFrame::Exclude(bool exclude){
 	//
 }
 
-void ClientFrame::CreateSurface(uint w, uint h, uint depth){
+void ClientFrame::CreateSurface(uint w, uint h, SURFACE_DEPTH depth, bool compatibility){
 	pcomp->updateQueue.push_back(this);
 
 	surfaceDepth = depth;
-	ptexture = pcomp->CreateTexture(w,h,surfaceDepth);
+	ptexture = pcomp->CreateTexture(w,h,surfaceDepth,compatibility);
+	DebugPrintf(stdout,"Texture created (new surface): %ux%u\n",w,h);
 
-	UpdateDescSets();
+	if(ptexture->image)
+		UpdateDescSets();
 }
 
 void ClientFrame::AdjustSurface(uint w, uint h){
@@ -155,9 +156,10 @@ void ClientFrame::AdjustSurface(uint w, uint h){
 	//In this case updating the descriptor sets would be enough, but we can't do that because of them being used currently by the pipeline.
 	if(!AssignPipeline(passignedSet->p))
 		throw Exception("Failed to assign a pipeline.");
-	DebugPrintf(stdout,"Texture created: %ux%u\n",w,h);
+	DebugPrintf(stdout,"Texture created (adjust): %ux%u\n",w,h);
 
-	UpdateDescSets();
+	if(ptexture->image)
+		UpdateDescSets();
 }
 
 void ClientFrame::DestroySurface(){
@@ -228,7 +230,7 @@ void ClientFrame::UpdateDescSets(){
 	vkUpdateDescriptorSets(pcomp->logicalDev,writeDescSets.size(),writeDescSets.data(),0,0);
 }
 
-CompositorInterface::CompositorInterface(const Configuration *pconfig) : physicalDevIndex(pconfig->deviceIndex), currentFrame(0), imageIndex(0), frameTag(0), pcolorBackground(0), pbackground(0), ptextEngine(0), pfsApp(0), pfsAppPrev(0), frameApproval(false), suspended(false), unredirected(false), playingAnimation(false), debugLayers(pconfig->debugLayers), scissoring(pconfig->scissoring), hostMemoryImport(pconfig->hostMemoryImport), unredirOnFullscreen(pconfig->unredirOnFullscreen), enableAnimation(pconfig->enableAnimation), animationDuration(pconfig->animationDuration), pfontName(pconfig->pfontName), fontSize(pconfig->fontSize){
+CompositorInterface::CompositorInterface(const Configuration *pconfig) : physicalDevIndex(pconfig->deviceIndex), currentFrame(0), imageIndex(0), frameTag(0), pcolorBackground(0), pbackground(0), ptextEngine(0), pfsApp(0), pfsAppPrev(0), frameApproval(false), suspended(false), unredirected(false), playingAnimation(false), debugLayers(pconfig->debugLayers), scissoring(pconfig->scissoring), incrementalPresent(pconfig->incrementalPresent), memoryImportMode(pconfig->memoryImportMode), unredirOnFullscreen(pconfig->unredirOnFullscreen), enableAnimation(pconfig->enableAnimation), animationDuration(pconfig->animationDuration), pfontName(pconfig->pfontName), fontSize(pconfig->fontSize){
 	//
 }
 
@@ -237,6 +239,8 @@ CompositorInterface::~CompositorInterface(){
 }
 
 void CompositorInterface::InitializeRenderEngine(){
+	DebugPrintf(stdout,"Using memory import mode %u.\n",memoryImportMode);
+
 	uint layerCount;
 	vkEnumerateInstanceLayerProperties(&layerCount,0);
 	VkLayerProperties *playerProps = new VkLayerProperties[layerCount];
@@ -463,32 +467,56 @@ void CompositorInterface::InitializeRenderEngine(){
 	VkExtensionProperties *pdevExtProps = new VkExtensionProperties[devExtCount];
 	vkEnumerateDeviceExtensionProperties(physicalDev,0,&devExtCount,pdevExtProps);
 
-	//device extensions
-	const char *pdevExtensions[] = {
+	std::set<const char *> requiredDevExtensionsSet = {
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-		VK_KHR_INCREMENTAL_PRESENT_EXTENSION_NAME,
-		//VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
-		VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-		VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,
-		VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-		VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME
-		//VK_KHR_BIND_MEMORY_2_EXTENSION_NAME,
-		//VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
-		//VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
-		//VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
-		//VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME
-		//VK_GOOGLE_HLSL_FUNCTIONALITY1_EXTENSION_NAME,VK_GOOGLE_DECORATE_STRING_EXTENSION_NAME};
+		VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME
 	};
 
+	if(incrementalPresent)
+		requiredDevExtensionsSet.insert(VK_KHR_INCREMENTAL_PRESENT_EXTENSION_NAME);
+
+	switch(memoryImportMode){
+	case IMPORT_MODE_DMABUF:
+		requiredDevExtensionsSet.insert(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
+		break;
+	case IMPORT_MODE_HOST_MEMORY:
+		requiredDevExtensionsSet.insert(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+		requiredDevExtensionsSet.insert(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
+		break;
+	/*case IMPORT_MODE_CPU_COPY:
+		requiredDevExtensionsSet.insert(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+		break;*/
+	}
+
+	std::vector<const char *> requiredDevExtensions(requiredDevExtensionsSet.begin(),requiredDevExtensionsSet.end());
+
+	bool allAvailable = true;
 	DebugPrintf(stdout,"Enumerating required device extensions\n");
-	uint devExtFound = 0;
-	for(uint i = 0; i < devExtCount; ++i)
-		for(uint j = 0; j < sizeof(pdevExtensions)/sizeof(pdevExtensions[0]); ++j)
-			if(strcmp(pdevExtProps[i].extensionName,pdevExtensions[j]) == 0){
-				printf("  %s\n",pdevExtensions[j]);
-				++devExtFound;
+	for(uint i = 0, n = requiredDevExtensions.size(); i < n; ++i){
+		bool found = false;
+		for(uint j = 0; j < devExtCount; ++j)
+			if(strcmp(pdevExtProps[j].extensionName,requiredDevExtensions[i]) == 0){
+				printf("  Found: %s\n",requiredDevExtensions[i]);
+				found = true;
+				break;
 			}
-	if(devExtFound < sizeof(pdevExtensions)/sizeof(pdevExtensions[0]))
+		if(!found){
+			printf("  NOT found: %s\n",requiredDevExtensions[i]);
+			allAvailable = false;
+		}
+	}
+	if(!allAvailable)
 		throw Exception("Could not find all required device extensions.");
 
 	VkDeviceCreateInfo devCreateInfo = {};
@@ -496,8 +524,8 @@ void CompositorInterface::InitializeRenderEngine(){
 	devCreateInfo.pQueueCreateInfos = queueCreateInfo;
 	devCreateInfo.queueCreateInfoCount = queueCount;
 	devCreateInfo.pEnabledFeatures = &physicalDevFeatures;
-	devCreateInfo.ppEnabledExtensionNames = pdevExtensions;
-	devCreateInfo.enabledExtensionCount = sizeof(pdevExtensions)/sizeof(pdevExtensions[0]);
+	devCreateInfo.ppEnabledExtensionNames = requiredDevExtensions.data();
+	devCreateInfo.enabledExtensionCount = requiredDevExtensions.size();
 	if(debugLayers){
 		devCreateInfo.ppEnabledLayerNames = players;
 		devCreateInfo.enabledLayerCount = sizeof(players)/sizeof(players[0]);
@@ -626,6 +654,96 @@ void CompositorInterface::InitializeRenderEngine(){
 	presentRectLayers.reserve(32);
 
 	ptextEngine = new TextEngine(pfontName,fontSize,this);
+
+	//-------------------------------
+	if(memoryImportMode == IMPORT_MODE_DMABUF){
+		printf("DMA-buf import: texture format query:\n");
+		VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+
+		VkDrmFormatModifierPropertiesListEXT drmFormatModPropsList = {};
+		drmFormatModPropsList.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+
+		VkFormatProperties2 formatProps2 = {};
+		formatProps2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+		formatProps2.pNext = &drmFormatModPropsList;
+
+		vkGetPhysicalDeviceFormatProperties2(physicalDev,format,&formatProps2);
+
+		drmFormatModPropsList.pDrmFormatModifierProperties = new VkDrmFormatModifierPropertiesEXT[drmFormatModPropsList.drmFormatModifierCount];
+
+		VkFormatProperties2 formatProps2B = {};
+		formatProps2B.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+		formatProps2B.pNext = &drmFormatModPropsList;
+
+		VkPhysicalDeviceImageDrmFormatModifierInfoEXT drmInfo = {};
+		drmInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT;
+		drmInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VkPhysicalDeviceExternalImageFormatInfo externalImageFormatInfo = {};
+		externalImageFormatInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
+		externalImageFormatInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+		externalImageFormatInfo.pNext = &drmInfo;
+
+		VkPhysicalDeviceImageFormatInfo2 imageFormatInfo2 = {};
+		imageFormatInfo2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+		imageFormatInfo2.type = VK_IMAGE_TYPE_2D;
+		imageFormatInfo2.format = format;
+		imageFormatInfo2.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+		imageFormatInfo2.pNext = &externalImageFormatInfo;
+
+		VkExternalImageFormatProperties externalImageFormatProps = {};
+		externalImageFormatProps.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+
+		VkImageFormatProperties2 imageFormatProps2 = {};
+		imageFormatProps2.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+		imageFormatProps2.pNext = &externalImageFormatProps;
+
+		vkGetPhysicalDeviceFormatProperties2(physicalDev,format,&formatProps2B);
+
+		printf("  drmFormatModifierCount: %u\n",drmFormatModPropsList.drmFormatModifierCount);
+		for(uint i = 0; i < drmFormatModPropsList.drmFormatModifierCount; ++i){
+			printf("  modifier: %lu, features: %d, planes: %d\n",
+				drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifier,
+				drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifierTilingFeatures,
+				drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifierPlaneCount);
+			if((drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifierTilingFeatures &
+				VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT){
+				printf("  * render usage:");
+				imageFormatInfo2.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+				drmInfo.drmFormatModifier = drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifier;
+				VkResult r = vkGetPhysicalDeviceImageFormatProperties2(physicalDev,&imageFormatInfo2,&imageFormatProps2);
+				if(r != VK_SUCCESS){
+					printf(" format not supported\n");
+					continue;
+				}
+				if(!(externalImageFormatProps.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)){
+					printf(" importing not supported\n");
+					continue;
+				}
+				printf(" OK\n");
+				drmFormatModifiers.insert(std::pair<uint64, uint>(
+					drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifier,
+					drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifierPlaneCount));
+			}
+			/*if((drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifierTilingFeatures &
+				VK_FORMAT_FEATURE_TRANSFER_DST_BIT) == VK_FORMAT_FEATURE_TRANSFER_DST_BIT){
+				printf("  * transfer src usage:");
+				imageFormatInfo2.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+				drmInfo.drmFormatModifier = drmFormatModPropsList.pDrmFormatModifierProperties[i].drmFormatModifier;
+				VkResult r = vkGetPhysicalDeviceImageFormatProperties2(physicalDev,&imageFormatInfo2,&imageFormatProps2);
+				if(r != VK_SUCCESS){
+					printf(" format not supported\n");
+					continue;
+				}
+				if(!(externalImageFormatProps.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)){
+					printf(" importing not supported\n");
+					continue;
+				}
+				printf(" OK\n");
+			}*/
+		}
+		delete []drmFormatModPropsList.pDrmFormatModifierProperties;
+	}
 }
 
 void CompositorInterface::InitializeSwapchain(){
@@ -782,8 +900,10 @@ void CompositorInterface::AddDamageRegion(const VkRect2D *prect){
 	VkRectLayerKHR &rectLayer = presentRectLayers.emplace_back();
 	rectLayer.offset = {std::max(prect->offset.x,0),std::max(prect->offset.y,0)};
 	rectLayer.extent = {
-		prect->extent.width+std::min((int)imageExtent.width-(rectLayer.offset.x+(int)prect->extent.width),0),
-		prect->extent.height+std::min((int)imageExtent.height-(rectLayer.offset.y+(int)prect->extent.height),0)
+		rectLayer.offset.x+prect->extent.width > imageExtent.width?imageExtent.width-rectLayer.offset.x:prect->extent.width,
+		rectLayer.offset.y+prect->extent.height > imageExtent.height?imageExtent.height-rectLayer.offset.y:prect->extent.height
+		//prect->extent.width+std::min((int)imageExtent.width-(rectLayer.offset.x+(int)prect->extent.width),0),
+		//prect->extent.height+std::min((int)imageExtent.height-(rectLayer.offset.y+(int)prect->extent.height),0)
 	};
 	rectLayer.layer = 0;
 }
@@ -808,61 +928,24 @@ void CompositorInterface::AddDamageRegion(const WManager::Client *pclient){
 	rect1.offset = {pclient->oldRect.x-margin.x+titlePadOffset.x,pclient->oldRect.y-margin.y+titlePadOffset.y};
 	rect1.extent = {pclient->oldRect.w+2*margin.x-titlePadOffset.x+titlePadExtent.x,pclient->oldRect.h+2*margin.y-titlePadOffset.y+titlePadExtent.y};
 	AddDamageRegion(&rect1);
+	rect1.offset = {pclient->position.x-margin.x+titlePadOffset.x,pclient->position.y-margin.y+titlePadOffset.y};
+	rect1.extent = {pclient->rect.w+2*margin.x-titlePadOffset.x+titlePadExtent.x,pclient->rect.h+2*margin.y-titlePadOffset.y+titlePadExtent.y};
+	AddDamageRegion(&rect1);
+}
+
+void CompositorInterface::FullDamageRegion(){
+	if(!scissoring)
+		return;
+	VkRect2D screenRect;
+	screenRect.offset = {0,0};
+	screenRect.extent = imageExtent;
+
+	scissorRegions.clear();
+	scissorRegions.push_back(std::pair<VkRect2D, uint>(screenRect,0));
 }
 
 void CompositorInterface::WaitIdle(){
 	vkDeviceWaitIdle(logicalDev);
-}
-
-void CompositorInterface::CreateRenderQueueAppendix(const WManager::Client *pclient, const WManager::Container *pfocus){
-	auto s = [&](auto &p)->bool{
-		return pclient == std::get<0>(p);
-	};
-	for(auto m = std::find_if(appendixQueue.begin(),appendixQueue.end(),s);
-		m != appendixQueue.end(); m = std::find_if(m,appendixQueue.end(),s)){
-		RenderObject renderObject;
-		renderObject.pclient = std::get<1>(*m);
-		renderObject.pclientFrame = std::get<2>(*m);
-		renderObject.pclientFrame->oldShaderFlags = renderObject.pclientFrame->shaderFlags;
-		renderObject.pclientFrame->shaderFlags =
-			(renderObject.pclient->pcontainer == pfocus?ClientFrame::SHADER_FLAG_FOCUS:0)
-			|(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FLOATING?ClientFrame::SHADER_FLAG_FLOATING:0)
-			//|(renderObject.pclient->pcontainer->pParent && renderObject.pclient->pParent->flags & WManager::Container::FLAG_STACKED?ClientFrame::SHADER_FLAG_STACKED:0)
-			|renderObject.pclientFrame->shaderUserFlags;
-		renderQueue.push_back(renderObject);
-
-		CreateRenderQueueAppendix(std::get<1>(*m),pfocus);
-
-		m = appendixQueue.erase(m);
-	}
-}
-
-void CompositorInterface::CreateRenderQueue(const WManager::Container *pcontainer, const WManager::Container *pfocus){
-	if(!pcontainer->pch)
-		return; //workaround a bug with stackQueue, need to fix this properly
-	for(const WManager::Container *pcont : pcontainer->stackQueue){
-		if(pcont->pclient){
-			ClientFrame *pclientFrame = dynamic_cast<ClientFrame *>(pcont->pclient);
-			if(!pclientFrame || (!pclientFrame->enabled && pclientFrame != pfsApp))
-				continue;
-			
-			RenderObject renderObject;
-			renderObject.pclient = pcont->pclient;
-			renderObject.pclientFrame = pclientFrame;
-			renderObject.pclientFrame->oldShaderFlags = renderObject.pclientFrame->shaderFlags;
-			renderObject.pclientFrame->shaderFlags =
-				(pcont == pfocus || pcontainer == pfocus?ClientFrame::ClientFrame::SHADER_FLAG_FOCUS:0)
-				//|(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FLOATING?ClientFrame::SHADER_FLAG_FLOATING:0) //probably not required here
-				|(renderObject.pclient->pcontainer->pParent && renderObject.pclient->pcontainer->pParent->flags & WManager::Container::FLAG_STACKED?ClientFrame::SHADER_FLAG_STACKED:0)
-				|renderObject.pclientFrame->shaderUserFlags;
-			renderQueue.push_back(renderObject);
-		}
-		CreateRenderQueue(pcont,pcontainer == pfocus?pcont:pfocus);
-	}
-
-	if(!pcontainer->pclient)
-		return;
-	CreateRenderQueueAppendix(pcontainer->pclient,pfocus);
 }
 
 bool CompositorInterface::PollFrameFence(bool suspend){
@@ -914,7 +997,7 @@ bool CompositorInterface::PollFrameFence(bool suspend){
 
 	//release the textures no longer in use
 	textureCache.erase(std::remove_if(textureCache.begin(),textureCache.end(),[&](auto &textureCacheEntry)->bool{
-		if(frameTag < textureCacheEntry.releaseTag+swapChainImageCount+1 || timespec_diff(frameTime,textureCacheEntry.releaseTime) < 5.0f)
+		if(frameTag < textureCacheEntry.releaseTag+swapChainImageCount+1 || timespec_diff(frameTime,textureCacheEntry.releaseTime) < 5.0)
 			return false;
 		delete textureCacheEntry.ptexture;
 		return true;
@@ -942,71 +1025,37 @@ bool CompositorInterface::PollFrameFence(bool suspend){
 	return true;
 }
 
-void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proot, const std::vector<std::pair<const WManager::Client *, WManager::Client *>> *pstackAppendix, const WManager::Container *pfocus){
-	if(!proot)
-		return;
-	
-	//Create a render list elements arranged from back to front
+void CompositorInterface::GenerateCommandBuffers(const std::deque<WManager::Client *> *pclientStack, const WManager::Container *pfocus, const WManager::Client *pfocusClient){
 	renderQueue.clear();
-	appendixQueue.clear();
-	for(auto &p : *pstackAppendix){
-		ClientFrame *pclientFrame = dynamic_cast<ClientFrame *>(p.second);
-		if(!pclientFrame || !pclientFrame->enabled)
+	for(auto m : *pclientStack){
+		ClientFrame *pclientFrame = dynamic_cast<ClientFrame *>(m);
+		if(!pclientFrame || (!pclientFrame->enabled && pclientFrame != pfsApp))
 			continue;
-		if(p.first){
-			appendixQueue.push_back(AppendixQueueElement(p.first,p.second,pclientFrame));
-			continue;
-		}
-		//desktop features are placed first
+
 		RenderObject renderObject;
-		renderObject.pclient = p.second;
+		renderObject.pclient = m;
 		renderObject.pclientFrame = pclientFrame;
 		renderObject.pclientFrame->oldShaderFlags = renderObject.pclientFrame->shaderFlags;
 		renderObject.pclientFrame->shaderFlags =
-			(renderObject.pclient->pcontainer == pfocus?ClientFrame::SHADER_FLAG_FOCUS:0)
-			|(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FLOATING?ClientFrame::SHADER_FLAG_FLOATING:0)
-			|(renderObject.pclient->pcontainer->pParent && renderObject.pclient->pcontainer->pParent->flags & WManager::Container::FLAG_STACKED?ClientFrame::SHADER_FLAG_STACKED:0)
-			|renderObject.pclientFrame->shaderUserFlags;
-		renderQueue.push_back(renderObject);
-	}
-
-	CreateRenderQueue(proot,pfocus);
-
-	for(auto m = appendixQueue.begin(); m != appendixQueue.end();){
-		auto k = std::find_if(appendixQueue.begin(),appendixQueue.end(),[&](auto &p)->bool{
-			return std::get<0>(*m) == std::get<1>(p);
-		});
-		if(k != appendixQueue.end()){
-			++m;
-			continue;
+			ClientFrame::SHADER_FLAG_CONTAINER_FOCUS|renderObject.pclientFrame->shaderUserFlags;
+		if(renderObject.pclient == pfocusClient)
+			renderObject.pclientFrame->shaderFlags |= ClientFrame::SHADER_FLAG_FOCUS;
+		else
+		if(renderObject.pclient->pcontainer != renderObject.pclient->pcontainer->GetRoot()){
+			for(WManager::Container *pcontainer = renderObject.pclient->pcontainer; pcontainer; pcontainer = pcontainer->GetParent())
+				if(pfocus == pcontainer){
+					renderObject.pclientFrame->shaderFlags |= ClientFrame::SHADER_FLAG_FOCUS;
+					break;
+				}
 		}
-			
-		RenderObject renderObject;
-		renderObject.pclient = std::get<1>(*m);
-		renderObject.pclientFrame = std::get<2>(*m);
-		renderObject.pclientFrame->oldShaderFlags = renderObject.pclientFrame->shaderFlags;
-		renderObject.pclientFrame->shaderFlags =
-			(renderObject.pclient->pcontainer == pfocus?ClientFrame::SHADER_FLAG_FOCUS:0)
-			|(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FLOATING?ClientFrame::SHADER_FLAG_FLOATING:0)
-			|(renderObject.pclient->pcontainer->pParent && renderObject.pclient->pcontainer->pParent->flags & WManager::Container::FLAG_STACKED?ClientFrame::SHADER_FLAG_STACKED:0)
-			|renderObject.pclientFrame->shaderUserFlags;
-		renderQueue.push_back(renderObject);
-
-		CreateRenderQueueAppendix(std::get<1>(*m),pfocus);
-
-		m = appendixQueue.erase(m);
-	}
-
-	for(auto &p : appendixQueue){ //push the remaining (untransient) windows to the end of the queue
-		RenderObject renderObject;
-		renderObject.pclient = std::get<1>(p);
-		renderObject.pclientFrame = std::get<2>(p);
-		renderObject.pclientFrame->oldShaderFlags = renderObject.pclientFrame->shaderFlags;
-		renderObject.pclientFrame->shaderFlags =
-			(renderObject.pclient->pcontainer == pfocus?ClientFrame::SHADER_FLAG_FOCUS:0)
-			|(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FLOATING?ClientFrame::SHADER_FLAG_FLOATING:0)
-			|(renderObject.pclient->pcontainer->pParent && renderObject.pclient->pcontainer->pParent->flags & WManager::Container::FLAG_STACKED?ClientFrame::SHADER_FLAG_STACKED:0)
-			|renderObject.pclientFrame->shaderUserFlags;
+		if(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FLOATING)
+			renderObject.pclientFrame->shaderFlags |= ClientFrame::SHADER_FLAG_FLOATING;
+		if(renderObject.pclient->pcontainer->pParent && renderObject.pclient->pcontainer->pParent->flags & WManager::Container::FLAG_STACKED){
+			renderObject.pclientFrame->shaderFlags |= ClientFrame::SHADER_FLAG_STACKED;
+			if(!renderObject.pclient->pcontainer->pParent->focusQueue.empty()
+				&& renderObject.pclient->pcontainer->pParent->focusQueue.back() != renderObject.pclient->pcontainer)
+					renderObject.pclientFrame->shaderFlags &= ~ClientFrame::SHADER_FLAG_CONTAINER_FOCUS;
+		}
 		renderQueue.push_back(renderObject);
 	}
 
@@ -1020,7 +1069,7 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 
 		float s;
 		if(enableAnimation){
-			float t = timespec_diff(frameTime,renderObject.pclient->translationTime);
+			float t = (float)timespec_diff(frameTime,renderObject.pclient->translationTime);
 			s = std::clamp(t/animationDuration,0.0f,1.0f);
 			s = 1.0f/(1.0f+expf(-10.0f*s+5.0f));
 		}else s = 1.0f;
@@ -1066,7 +1115,6 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 	if(pbackground1)
 		pbackground1->UpdateContents(&pcopyCommandBuffers[currentFrame]);
 
-	//TODO: update only visible clients
 	for(ClientFrame *pclientFrame : updateQueue)
 		pclientFrame->UpdateContents(&pcopyCommandBuffers[currentFrame]);
 	updateQueue.clear();
@@ -1166,9 +1214,14 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 
 		vkCmdBindPipeline(pcommandBuffers[currentFrame],VK_PIPELINE_BIND_POINT_GRAPHICS,renderObject.pclientFrame->passignedSet->p->pipeline);
 
-		renderObject.pclientFrame->Draw(frame,renderObject.pclient->pcontainer->margin,renderObject.pclient->pcontainer->titlePad,renderObject.pclient->pcontainer->titleSpan,renderObject.pclient->stackIndex,renderObject.pclientFrame->shaderFlags,&pcommandBuffers[currentFrame]);
+		glm::vec2 titlePad = (!renderObject.pclient->pcontainer->titleStackOnly || (renderObject.pclient->pcontainer->pParent && renderObject.pclient->pcontainer->pParent->flags & WManager::Container::FLAG_STACKED))?
+		renderObject.pclient->pcontainer->titlePad:glm::vec2(0.0f);
+		renderObject.pclientFrame->Draw(frame,renderObject.pclient->pcontainer->margin,titlePad,renderObject.pclient->pcontainer->titleSpan,renderObject.pclient->stackIndex,renderObject.pclientFrame->shaderFlags,&pcommandBuffers[currentFrame]);
 
-		if(renderObject.pclient->pcontainer->titleBar != WManager::Container::TITLEBAR_NONE && !(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FULLSCREEN) && renderObject.pclientFrame->ptitle){
+		if(renderObject.pclient->pcontainer->titleBar != WManager::Container::TITLEBAR_NONE
+			&& !(renderObject.pclient->pcontainer->flags & WManager::Container::FLAG_FULLSCREEN)
+			&& (!renderObject.pclient->pcontainer->titleStackOnly || (renderObject.pclient->pcontainer->pParent && renderObject.pclient->pcontainer->pParent->flags & WManager::Container::FLAG_STACKED))
+			&& renderObject.pclientFrame->ptitle){
 			glm::uvec2 titlePosition = glm::uvec2(frame.offset.x,frame.offset.y);
 			if(renderObject.pclient->titlePad1.x > 1e-5)
 				titlePosition.x += frame.extent.width;
@@ -1176,11 +1229,11 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 				titlePosition.y += frame.extent.height;
 			glm::vec2 titlePadAbs = glm::abs(renderObject.pclient->titlePad1);
 			if(titlePadAbs.x > titlePadAbs.y){
-				titlePosition.y += renderObject.pclient->titleStackOffset.y+renderObject.pclientFrame->ptitle->GetTextLength()-(renderObject.pclientFrame->ptitle->GetTextLength()-renderObject.pclient->titleFrameExtent.y);
-				titlePosition.x += (ptextEngine->fontFace->glyph->metrics.horiBearingY>>6)/2;
+				titlePosition.y += renderObject.pclient->titleStackOffset.y+renderObject.pclient->titleFrameExtent.y;
+				titlePosition.x += (renderObject.pclient->titleRect.w-ptextEngine->fontFace->size->metrics.height/128)/2;
 			}else{
 				titlePosition.x += renderObject.pclient->titleStackOffset.x;
-				titlePosition.y += (ptextEngine->fontFace->glyph->metrics.horiBearingY>>6)/2;
+				titlePosition.y += (renderObject.pclient->titleRect.h-ptextEngine->fontFace->size->metrics.height/128)/2;
 			}
 			titlePosition += 0.5f*renderObject.pclient->titlePad1;
 
@@ -1253,7 +1306,7 @@ void CompositorInterface::Present(){
 	presentInfo.pSwapchains = &swapChain;
 	presentInfo.pImageIndices = &imageIndex;
 	presentInfo.pResults = 0;
-	presentInfo.pNext = presentRegion.rectangleCount > 0?&presentRegions:0;
+	presentInfo.pNext = (incrementalPresent && presentRegion.rectangleCount > 0)?&presentRegions:0;
 	vkQueuePresentKHR(queue[QUEUE_INDEX_PRESENT],&presentInfo);
 
 	presentRectLayers.clear();
@@ -1263,7 +1316,6 @@ void CompositorInterface::Present(){
 	frameTag++;
 }
 
-//-vertex buffer layout is always fixed, since there is no predefined information on what shaders (and thus inputs) will be used on what vertex data
 //TODO: take out 'new Pipeline' from below, move it outside - no need to template this
 template<class T>
 Pipeline * CompositorInterface::LoadPipeline(const char *pshaderName[Pipeline::SHADER_MODULE_COUNT], const std::vector<std::pair<ShaderModule::INPUT,uint>> *pvertexBufferLayout){
@@ -1306,7 +1358,7 @@ template Pipeline * CompositorInterface::LoadPipeline<ClientPipeline>(const char
 template Pipeline * CompositorInterface::LoadPipeline<TextPipeline>(const char *[Pipeline::SHADER_MODULE_COUNT], const std::vector<std::pair<ShaderModule::INPUT,uint>> *);
 
 void CompositorInterface::ClearBackground(){
-	ClientFrame *pbackground1 = dynamic_cast<ClientFrame *>(pbackground);
+	ClientFrame *pbackground1 = dynamic_cast<ClientFrame *>(pbackground); //pixmap wallpaper
 	if(pbackground1)
 		delete pbackground1;
 	if(!pcolorBackground){
@@ -1318,25 +1370,25 @@ void CompositorInterface::ClearBackground(){
 
 	pbackground = pcolorBackground;
 	
-	VkRect2D screenRect;
-	screenRect.offset = {0,0};
-	screenRect.extent = imageExtent;
-	AddDamageRegion(&screenRect);
+	FullDamageRegion();
 }
 
-Texture * CompositorInterface::CreateTexture(uint w, uint h, uint surfaceDepth){
-	Texture *ptexture;
+TextureBase * CompositorInterface::CreateTexture(uint w, uint h, ClientFrame::SURFACE_DEPTH surfaceDepth, bool compatibility){
+	TextureBase *ptexture;
 
 	//should be larger than 0:
 	w = std::max(std::min(w,physicalDevProps.limits.maxImageDimension2D),1u);
 	h = std::max(std::min(h,physicalDevProps.limits.maxImageDimension2D),1u);
 
-	const VkComponentMapping *pcomponentMapping = surfaceDepth > 24?&TexturePixmap::pixmapComponentMapping:&TexturePixmap::pixmapComponentMapping24;
+	const VkComponentMapping *pcomponentMapping = surfaceDepth == ClientFrame::SURFACE_DEPTH_24
+		?&TexturePixmap::pixmapComponentMapping24
+		:&TexturePixmap::pixmapComponentMapping;
 	uint componentMappingHash = TextureBase::GetComponentMappingHash(pcomponentMapping);
 
 	auto m = std::find_if(textureCache.begin(),textureCache.end(),[&](auto &r)->bool{
-		//return r.ptexture->w == w && r.ptexture->h == h;
-		return r.ptexture->w == w && r.ptexture->h == h && r.ptexture->componentMappingHash == componentMappingHash;
+		TextureCompatible *ptc = dynamic_cast<TextureCompatible *>(r.ptexture);
+		return r.ptexture->w == w && r.ptexture->h == h && r.ptexture->componentMappingHash == componentMappingHash
+			&& ((compatibility && ptc != 0) || ((!compatibility && ptc == 0)));
 	});
 	if(m != textureCache.end()){
 		ptexture = (*m).ptexture;
@@ -1345,12 +1397,26 @@ Texture * CompositorInterface::CreateTexture(uint w, uint h, uint surfaceDepth){
 		textureCache.pop_back();
 		printf("----------- found cached texture\n");
 
-	}else ptexture = new Texture(w,h,pcomponentMapping,0,this);
+	}else{
+		if(compatibility)
+			ptexture = new TextureCompatible(w,h,pcomponentMapping,0,this);
+		else switch(memoryImportMode){
+		case IMPORT_MODE_CPU_COPY:
+			ptexture = new TextureSharedMemoryStaged(w,h,pcomponentMapping,0,this);
+			break;
+		case IMPORT_MODE_HOST_MEMORY:
+			ptexture = new TextureSharedMemory(w,h,pcomponentMapping,0,this);
+			break;
+		case IMPORT_MODE_DMABUF:
+			ptexture = new TextureDMABuffer(w,h,pcomponentMapping,0,this);
+			break;
+		}
+	}
 
 	return ptexture;
 }
 
-void CompositorInterface::ReleaseTexture(Texture *ptexture){
+void CompositorInterface::ReleaseTexture(TextureBase *ptexture){
 	TextureCacheEntry textureCacheEntry;
 	textureCacheEntry.ptexture = ptexture;
 	textureCacheEntry.releaseTag = frameTag;
@@ -1368,6 +1434,7 @@ VkDescriptorSet * CompositorInterface::CreateDescSets(const ShaderModule *pshade
 		descSetAllocateInfo.descriptorPool = descPool;
 		descSetAllocateInfo.pSetLayouts = pshaderModule->pdescSetLayouts;
 		descSetAllocateInfo.descriptorSetCount = pshaderModule->setCount;
+		//Try to allocate in different pools until one succeeds.
 		if(vkAllocateDescriptorSets(logicalDev,&descSetAllocateInfo,pdescSets) == VK_SUCCESS){
 			descPoolReference.push_back(std::pair<VkDescriptorSet *, VkDescriptorPool>(pdescSets,descPool));
 			return pdescSets;
@@ -1458,7 +1525,7 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 		return rect.w < rect1.offset.x+rect1.extent.width || rect.h < rect1.offset.y+rect1.extent.height;
 	}),damageRegions.end());
 
-	if(!fullRegionUpdate && damageRegions.size() == 0)
+	if(!enabled || (ptexture->imageLayout != VK_IMAGE_LAYOUT_UNDEFINED && ((!fullRegionUpdate && damageRegions.empty()) || !(shaderFlags & ClientFrame::SHADER_FLAG_CONTAINER_FOCUS))))
 		return;
 
 	damageRegions.clear();
@@ -1470,8 +1537,43 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 
 	fullRegionUpdate = false;
 
-	if(!pcomp->hostMemoryImport){
-		unsigned char *pdata = (unsigned char *)ptexture->Map();
+	if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_DMABUF){
+		for(VkRect2D &rect1 : damageRegions){
+			VkRect2D screenRect;
+			screenRect.offset = {(sint)position.x+rect1.offset.x,(sint)position.y+rect1.offset.y};
+			screenRect.extent = rect1.extent;
+			pcomp->AddDamageRegion(&screenRect);
+		}
+		dynamic_cast<TextureDMABuffer *>(ptexture)->Update(pcommandBuffer,damageRegions.data(),damageRegions.size());
+
+	}else
+	if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_HOST_MEMORY){
+
+		xcb_shm_get_image_cookie_t imageCookie = xcb_shm_get_image(pbackend->pcon,windowPixmap,0,0,rect.w,rect.h,~0u,XCB_IMAGE_FORMAT_Z_PIXMAP,segment,0); //need to get whole image
+
+		//wait for the buffers to get updated before copying them
+		xcb_shm_get_image_reply_t *pimageReply = xcb_shm_get_image_reply(pbackend->pcon,imageCookie,0);
+		xcb_flush(pbackend->pcon);
+		if(pimageReply)
+			free(pimageReply);
+		else{
+			DebugPrintf(stderr,"xcb_shm_get_image_reply() returned null.\n");
+			damageRegions.clear();
+			return;
+		}
+
+		for(VkRect2D &rect1 : damageRegions){
+			VkRect2D screenRect;
+			screenRect.offset = {(sint)position.x+rect1.offset.x,(sint)position.y+rect1.offset.y};
+			screenRect.extent = rect1.extent;
+			pcomp->AddDamageRegion(&screenRect);
+		}
+		dynamic_cast<TextureSharedMemory *>(ptexture)->Update(pcommandBuffer,damageRegions.data(),damageRegions.size());
+
+	}else{
+		//
+		TextureStaged *ptexture1 = dynamic_cast<TextureStaged *>(ptexture);
+		unsigned char *pdata = (unsigned char *)ptexture1->Map();
 
 		for(VkRect2D &rect1 : damageRegions){
 			xcb_shm_get_image_cookie_t imageCookie = xcb_shm_get_image(pbackend->pcon,windowPixmap,rect1.offset.x,rect1.offset.y,rect1.extent.width,rect1.extent.height,~0u,XCB_IMAGE_FORMAT_Z_PIXMAP,segment,0);
@@ -1479,7 +1581,13 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 			//wait for the buffers to get updated before copying them
 			xcb_shm_get_image_reply_t *pimageReply = xcb_shm_get_image_reply(pbackend->pcon,imageCookie,0);
 			xcb_flush(pbackend->pcon);
-			free(pimageReply);
+			if(pimageReply)
+				free(pimageReply);
+			else{
+				DebugPrintf(stderr,"xcb_shm_get_image_reply() returned null.\n");
+				damageRegions.clear();
+				return;
+			}
 
 			for(uint y = 0; y < rect1.extent.height; ++y){
 				uint offsetDst = 4*(rect.w*(y+rect1.offset.y)+rect1.offset.x);
@@ -1492,24 +1600,7 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 			screenRect.extent = rect1.extent;
 			pcomp->AddDamageRegion(&screenRect);
 		}
-		ptexture->Unmap(pcommandBuffer,damageRegions.data(),damageRegions.size());
-
-	}else{
-		xcb_shm_get_image_cookie_t imageCookie = xcb_shm_get_image(pbackend->pcon,windowPixmap,0,0,rect.w,rect.h,~0u,XCB_IMAGE_FORMAT_Z_PIXMAP,segment,0); //need to get whole image
-
-		//wait for the buffers to get updated before copying them
-		xcb_shm_get_image_reply_t *pimageReply = xcb_shm_get_image_reply(pbackend->pcon,imageCookie,0);
-		xcb_flush(pbackend->pcon);
-		free(pimageReply);
-
-		for(VkRect2D &rect1 : damageRegions){
-			VkRect2D screenRect;
-			screenRect.offset = {(sint)position.x+rect1.offset.x,(sint)position.y+rect1.offset.y};
-			screenRect.extent = rect1.extent;
-			pcomp->AddDamageRegion(&screenRect);
-		}
-		
-		ptexture->Update(pcommandBuffer,damageRegions.data(),damageRegions.size());
+		ptexture1->Unmap(pcommandBuffer,damageRegions.data(),damageRegions.size());
 	}
 
 	damageRegions.clear();
@@ -1529,32 +1620,53 @@ void X11ClientFrame::AdjustSurface1(){
 	if(!enabled)
 		return;
 	if(oldRect.w != rect.w || oldRect.h != rect.h){
-		//detach
-		if(pcomp->hostMemoryImport)
-			ptexture->Detach(pcomp->frameTag);
-		xcb_shm_detach(pbackend->pcon,segment);
-		shmdt(pchpixels);
+		if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_DMABUF){
+			dynamic_cast<TextureDMABuffer *>(ptexture)->Detach();
 
-		shmctl(shmid,IPC_RMID,0);
+			xcb_free_pixmap(pbackend->pcon,windowPixmap);
+			xcb_composite_name_window_pixmap(pbackend->pcon,window,windowPixmap);
 
-		//attach
-		uint textureSize = rect.w*rect.h*4;
-		shmid = shmget(IPC_PRIVATE,(textureSize-1)+pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment-(textureSize-1)%pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment,IPC_CREAT|0777);
-		if(shmid == -1){
-			DebugPrintf(stderr,"Failed to allocate shared memory.\n");
-			return;
-		}
-		xcb_shm_attach(pbackend->pcon,segment,shmid,0);
-		pchpixels = (unsigned char*)shmat(shmid,0,0);
+			AdjustSurface(rect.w,rect.h);
 
-		xcb_free_pixmap(pbackend->pcon,windowPixmap);
-		xcb_composite_name_window_pixmap(pbackend->pcon,window,windowPixmap);
+			//texture renewed, cast again
+			if(!dynamic_cast<TextureDMABuffer *>(ptexture)->Attach(windowPixmap)){
+				xcb_free_pixmap(pbackend->pcon,windowPixmap);
+				enabled = false;
+				return;
+			}else UpdateDescSets(); //view is recreated every time for the imported buffer
 
-		AdjustSurface(rect.w,rect.h);
+		}else{
+			TextureSharedMemory *ptexture1;
+			if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_HOST_MEMORY)
+				dynamic_cast<TextureSharedMemory *>(ptexture)->Detach(pcomp->frameTag);
 
-		if(pcomp->hostMemoryImport && !ptexture->Attach(pchpixels)){
-			DebugPrintf(stderr,"Failed to import host memory. Disabling feature.\n");
-			pcomp->hostMemoryImport = false;
+			xcb_shm_detach(pbackend->pcon,segment);
+			shmdt(pchpixels);
+
+			shmctl(shmid,IPC_RMID,0);
+
+			//attach
+			uint textureSize = rect.w*rect.h*4;
+			shmid = shmget(IPC_PRIVATE,(textureSize-1)+pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment-(textureSize-1)%pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment,IPC_CREAT|0777);
+			if(shmid == -1){
+				DebugPrintf(stderr,"Failed to allocate shared memory.\n");
+				return;
+			}
+			xcb_shm_attach(pbackend->pcon,segment,shmid,0);
+			pchpixels = (unsigned char*)shmat(shmid,0,0);
+
+			xcb_free_pixmap(pbackend->pcon,windowPixmap);
+			xcb_composite_name_window_pixmap(pbackend->pcon,window,windowPixmap);
+
+			AdjustSurface(rect.w,rect.h);
+
+			if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_HOST_MEMORY){
+				if(!dynamic_cast<TextureSharedMemory *>(ptexture)->Attach(pchpixels)){
+					xcb_free_pixmap(pbackend->pcon,windowPixmap);
+					enabled = false;
+					return;
+				}else UpdateDescSets(); //view is recreated every time for the imported buffer
+			}
 		}
 
 		pcomp->AddDamageRegion(this);
@@ -1573,41 +1685,57 @@ void X11ClientFrame::StartComposition1(){
 		return;
 	xcb_composite_name_window_pixmap(pbackend->pcon,window,windowPixmap);
 
+	if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_DMABUF){
+		//
+		CreateSurface(rect.w,rect.h,SURFACE_DEPTH_32);
+		if(!dynamic_cast<TextureDMABuffer *>(ptexture)->Attach(windowPixmap)){
+			xcb_free_pixmap(pbackend->pcon,windowPixmap);
+			return; //do not show
+		}else UpdateDescSets(); //view is recreated every time for the imported buffer
+
+	}else{
+		//
+		//attach to shared memory
+		uint textureSize = rect.w*rect.h*4;
+		shmid = shmget(IPC_PRIVATE,(textureSize-1)+pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment-(textureSize-1)%pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment,IPC_CREAT|0777);
+		if(shmid == -1){
+			DebugPrintf(stderr,"Failed to allocate shared memory.\n");
+			xcb_free_pixmap(pbackend->pcon,windowPixmap);
+			return;
+		}
+		segment = xcb_generate_id(pbackend->pcon);
+		xcb_shm_attach(pbackend->pcon,segment,shmid,0);
+		pchpixels = (unsigned char*)shmat(shmid,0,0);
+
+		xcb_flush(pbackend->pcon);
+		
+		//get image depth
+		xcb_shm_get_image_cookie_t imageCookie = xcb_shm_get_image(pbackend->pcon,windowPixmap,0,0,1,1,~0u,XCB_IMAGE_FORMAT_Z_PIXMAP,segment,0);
+		xcb_shm_get_image_reply_t *pimageReply = xcb_shm_get_image_reply(pbackend->pcon,imageCookie,0);
+
+		SURFACE_DEPTH depth;
+		if(pimageReply){
+			depth = pimageReply->depth == 24?SURFACE_DEPTH_24:SURFACE_DEPTH_32;
+			free(pimageReply);
+		}else{
+			DebugPrintf(stderr,"Failed to get SHM image. Assuming 24 bit depth.\n");
+			depth = SURFACE_DEPTH_24;
+		}
+
+		CreateSurface(rect.w,rect.h,depth);
+
+		if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_HOST_MEMORY){
+			if(!dynamic_cast<TextureSharedMemory *>(ptexture)->Attach(pchpixels)){
+				xcb_free_pixmap(pbackend->pcon,windowPixmap);
+				return;
+			}else UpdateDescSets(); //view is recreated every time for the imported buffer
+		}
+	}
+
+	DebugPrintf(stdout,"StartComposition1() for %x\n",window);
+
 	damage = xcb_generate_id(pbackend->pcon);
 	xcb_damage_create(pbackend->pcon,damage,window,XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
-
-	//attach to shared memory
-	uint textureSize = rect.w*rect.h*4;
-	shmid = shmget(IPC_PRIVATE,(textureSize-1)+pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment-(textureSize-1)%pcomp->physicalDevExternalMemoryHostProps.minImportedHostPointerAlignment,IPC_CREAT|0777);
-	if(shmid == -1){
-		DebugPrintf(stderr,"Failed to allocate shared memory.\n");
-		return;
-	}
-	segment = xcb_generate_id(pbackend->pcon);
-	xcb_shm_attach(pbackend->pcon,segment,shmid,0);
-	pchpixels = (unsigned char*)shmat(shmid,0,0);
-
-	xcb_flush(pbackend->pcon);
-	
-	//get image depth
-	xcb_shm_get_image_cookie_t imageCookie = xcb_shm_get_image(pbackend->pcon,windowPixmap,0,0,1,1,~0u,XCB_IMAGE_FORMAT_Z_PIXMAP,segment,0);
-	xcb_shm_get_image_reply_t *pimageReply = xcb_shm_get_image_reply(pbackend->pcon,imageCookie,0);
-
-	uint depth;
-	if(pimageReply){
-		depth = pimageReply->depth;
-		free(pimageReply);
-	}else{
-		DebugPrintf(stderr,"Failed to get SHM image. Assuming 24 bit depth.\n");
-		depth = 24;
-	}
-
-	CreateSurface(rect.w,rect.h,depth);
-
-	if(pcomp->hostMemoryImport && !ptexture->Attach(pchpixels)){
-		DebugPrintf(stderr,"Failed to import host memory. Disabling feature.\n");
-		pcomp->hostMemoryImport = false;
-	}
 
 	pcomp->AddDamageRegion(this);
 	enabled = true;
@@ -1621,19 +1749,25 @@ void X11ClientFrame::Unredirect1(){
 void X11ClientFrame::StopComposition1(){
 	if(!enabled)
 		return;
-	if(pcomp->hostMemoryImport)
-		ptexture->Detach(pcomp->frameTag);
+	if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_DMABUF)
+		dynamic_cast<TextureDMABuffer *>(ptexture)->Detach();
+	else{
+		if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_HOST_MEMORY)
+			dynamic_cast<TextureSharedMemory *>(ptexture)->Detach(pcomp->frameTag);
 
-	xcb_shm_detach(pbackend->pcon,segment);
-	shmdt(pchpixels);
+		xcb_shm_detach(pbackend->pcon,segment);
+		shmdt(pchpixels);
 
-	shmctl(shmid,IPC_RMID,0);
+		shmctl(shmid,IPC_RMID,0);
+	}
 
 	xcb_damage_destroy(pbackend->pcon,damage);
 
 	xcb_free_pixmap(pbackend->pcon,windowPixmap);
 
 	DestroySurface();
+
+	DebugPrintf(stdout,"StopComposition1() for %x\n",window);
 
 	pcomp->AddDamageRegion(this);
 	enabled = false;
@@ -1661,67 +1795,53 @@ X11Background::X11Background(xcb_pixmap_t _pixmap, uint _w, uint _h, const char 
 
 	pchpixels = (unsigned char*)shmat(shmid,0,0);
 
-	CreateSurface(w,h,24);
+	CreateSurface(w,h,SURFACE_DEPTH_24,true);
 
-	if(pcomp->hostMemoryImport && !ptexture->Attach(pchpixels)){
-		DebugPrintf(stderr,"Failed to import host memory. Disabling feature.\n");
-		pcomp->hostMemoryImport = false;
-	}
-
-	VkRect2D screenRect;
-	screenRect.offset = {0,0};
-	screenRect.extent = {w,h};
-	pcomp->AddDamageRegion(&screenRect);
+	pcomp->FullDamageRegion();
 }
 
 X11Background::~X11Background(){
-	if(pcomp->hostMemoryImport)
-		ptexture->Detach(pcomp->frameTag);
-
 	xcb_shm_detach(pcomp11->pbackend->pcon,segment);
 	shmdt(pchpixels);
 
 	shmctl(shmid,IPC_RMID,0);
 
-	VkRect2D screenRect;
-	screenRect.offset = {0,0};
-	screenRect.extent = {w,h};
-	pcomp->AddDamageRegion(&screenRect);
+	pcomp->FullDamageRegion();
 }
 
 void X11Background::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 	if(!fullRegionUpdate)
 		return;
+	
+	/*if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_DMABUF){
+		pcomp->FullDamageRegion();
+		return;
+	}*/
+
+	VkRect2D screenRect;
+	screenRect.offset = {0,0};
+	screenRect.extent = {w,h};
 
 	xcb_shm_get_image_cookie_t imageCookie = xcb_shm_get_image(pcomp11->pbackend->pcon,pixmap,0,0,w,h,~0u,XCB_IMAGE_FORMAT_Z_PIXMAP,segment,0);
 
 	xcb_shm_get_image_reply_t *pimageReply = xcb_shm_get_image_reply(pcomp11->pbackend->pcon,imageCookie,0);
 	xcb_flush(pcomp11->pbackend->pcon);
 
-	if(!pimageReply){
-		DebugPrintf(stderr,"No shared memory.\n");
-		return;
-	}
+	if(pimageReply)
+		free(pimageReply);
+	else DebugPrintf(stderr,"xcb_shm_get_image_reply() returned null (background).\n");
 
-	free(pimageReply);
-
-	VkRect2D screenRect;
-	screenRect.offset = {0,0};
-	screenRect.extent = {w,h};
-
-	if(!pcomp->hostMemoryImport){
-		unsigned char *pdata = (unsigned char*)ptexture->Map();
-		memcpy(pdata,pchpixels,w*h*4);
-		
-		ptexture->Unmap(pcommandBuffer,&screenRect,1);
-	
-	}else{
-		ptexture->Update(pcommandBuffer,&screenRect,1);
-	}
+	//if(pcomp->memoryImportMode == CompositorInterface::IMPORT_MODE_CPU_COPY){
+	TextureStaged *ptexture1 = dynamic_cast<TextureStaged *>(ptexture);
+	unsigned char *pdata = (unsigned char*)ptexture1->Map();
+	memcpy(pdata,pchpixels,w*h*4);
+	ptexture1->Unmap(pcommandBuffer,&screenRect,1);
+	//}
 
 	fullRegionUpdate = false;
 
-	pcomp->AddDamageRegion(&screenRect);
+	pcomp->FullDamageRegion();
+	DebugPrintf(stdout,"Background contents updated.\n");
 }
 
 X11Compositor::X11Compositor(const Configuration *_pconfig, const Backend::X11Backend *_pbackend) : CompositorInterface(_pconfig), pbackend(_pbackend){
@@ -1750,7 +1870,7 @@ void X11Compositor::Start(){
 		throw Exception("Unable to get overlay window.");
 	overlay = poverlayReply->overlay_win;
 	free(poverlayReply);
-	DebugPrintf(stdout,"overlay xid: %u\n",overlay);
+	DebugPrintf(stdout,"overlay xid: %x\n",overlay);
 
 	uint mask = XCB_CW_EVENT_MASK;
 	uint values[1] = {XCB_EVENT_MASK_EXPOSURE};
@@ -1799,26 +1919,17 @@ void X11Compositor::Start(){
 
 	xcb_dri3_query_version_cookie_t dri3Cookie = xcb_dri3_query_version(pbackend->pcon,XCB_DRI3_MAJOR_VERSION,XCB_DRI3_MINOR_VERSION);
 	xcb_dri3_query_version_reply_t *pdri3Reply = xcb_dri3_query_version_reply(pbackend->pcon,dri3Cookie,0);
+	//DRI3 extension is optional
 	if(!pdri3Reply)
-		throw Exception("DRI3 extension unavailable.");
-	DebugPrintf(stdout,"DRI3 %u.%u\n",pdri3Reply->major_version,pdri3Reply->minor_version);
-	free(pdri3Reply);
+		DebugPrintf(stderr,"DRI3 extension unavailable.");
+	else{
+		DebugPrintf(stdout,"DRI3 %u.%u\n",pdri3Reply->major_version,pdri3Reply->minor_version);
+		free(pdri3Reply);
+	}
 
 	xcb_flush(pbackend->pcon);
 
 	InitializeRenderEngine();
-
-	/*char cardStr[256];
-	snprintf(cardStr,sizeof(cardStr),"/dev/dri/card%u",physicalDevIndex);
-
-	cardfd = open(cardStr,O_RDWR|FD_CLOEXEC);
-	if(cardfd < 0){
-		snprintf(Exception::buffer,sizeof(Exception::buffer),"Failed to open %s",cardStr);
-		throw Exception();
-	}
-	pgbmdev = gbm_create_device(cardfd);
-	if(!pgbmdev)
-		throw Exception("Failed to create GBM device.");*/
 }
 
 void X11Compositor::Stop(){
@@ -1827,9 +1938,6 @@ void X11Compositor::Stop(){
 	if(pcolorBackground)
 		delete pcolorBackground;
 	DestroyRenderEngine();
-
-	/*gbm_device_destroy(pgbmdev);
-	close(cardfd);*/
 
 	xcb_xfixes_set_window_shape_region(pbackend->pcon,overlay,XCB_SHAPE_SK_BOUNDING,0,0,XCB_XFIXES_REGION_NONE);
 	xcb_xfixes_set_window_shape_region(pbackend->pcon,overlay,XCB_SHAPE_SK_INPUT,0,0,XCB_XFIXES_REGION_NONE);
@@ -1864,6 +1972,8 @@ bool X11Compositor::FilterEvent(const Backend::X11Event *pevent){
 			DebugPrintf(stderr,"Unknown damage event.\n");
 			return true;
 		}
+		if(pclient->flags & Backend::X11Client::FLAG_UNMAPPING)
+			return true;
 
 		X11ClientFrame *pclientFrame = dynamic_cast<X11ClientFrame *>(pclient);
 
@@ -1937,7 +2047,7 @@ void X11Compositor::CreateSurfaceKHR(VkSurfaceKHR *psurface) const{
 }
 
 void X11Compositor::SetBackgroundPixmap(const Backend::BackendPixmapProperty *pPixmapProperty){
-	if(pbackground){
+	if(dynamic_cast<ClientFrame *>(pbackground)){ //clear previous background if any
 		delete pbackground;
 		pbackground = pcolorBackground;
 	}
@@ -1952,6 +2062,7 @@ void X11Compositor::SetBackgroundPixmap(const Backend::BackendPixmapProperty *pP
 		};
 		pbackground = new X11Background(pPixmapProperty->pixmap,pgeometryReply->width,pgeometryReply->height,pshaderName,this);
 		printf("background set!\n");
+		free(pgeometryReply);
 	}
 }
 
@@ -1983,7 +2094,8 @@ void X11DebugClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 	uint color[3];
 	for(uint &t : color)
 		t = rand()%190;
-	unsigned char *pdata = (unsigned char*)ptexture->Map();
+	TextureStaged *ptexture1 = dynamic_cast<TextureStaged *>(ptexture);
+	unsigned char *pdata = (unsigned char*)ptexture1->Map();
 	for(uint i = 0, n = rect.w*rect.h; i < n; ++i){
 		//unsigned char t = (float)(i/rect.w)/(float)rect.h*255;
 		pdata[4*i+0] = color[0];
@@ -1994,7 +2106,7 @@ void X11DebugClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 	VkRect2D rect1;
 	rect1.offset = {0,0};
 	rect1.extent = {rect.w,rect.h};
-	ptexture->Unmap(pcommandBuffer,&rect1,1);
+	ptexture1->Unmap(pcommandBuffer,&rect1,1);
 
 	pcomp->AddDamageRegion(&rect1);
 }
@@ -2015,7 +2127,7 @@ void X11DebugClientFrame::Redirect1(){
 void X11DebugClientFrame::StartComposition1(){
 	if(enabled)
 		return;
-	CreateSurface(rect.w,rect.h,32);
+	CreateSurface(rect.w,rect.h,SURFACE_DEPTH_32);
 	pcomp->AddDamageRegion(this);
 	enabled = true;
 }

@@ -4,9 +4,9 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_xcb.h>
 
-//struct gbm_bo;
-
 namespace Compositor{
+
+#define TEXTURE_BASE_FLAG_SKIP 0x1
 
 class TextureBase{
 public:
@@ -39,6 +39,7 @@ public:
 	virtual ~TextureStaged();
 	const void * Map() const;
 	void Unmap(const VkCommandBuffer *, const VkRect2D *, uint);
+	//virtual void Update(const VkCommandBuffer *, const VkRect2D *, uint) = 0;
 
 	VkBuffer stagingBuffer;
 	VkDeviceMemory stagingMemory;
@@ -52,18 +53,13 @@ class TexturePixmap : virtual public TextureBase{
 public:
 	TexturePixmap(uint, uint, const VkComponentMapping *, uint, const class CompositorInterface *);
 	virtual ~TexturePixmap();
-	void Attach(xcb_pixmap_t);
+	bool Attach(xcb_pixmap_t);
 	void Detach();
 	void Update(const VkCommandBuffer *, const VkRect2D *, uint);
 
-	VkImage transferImage;
-	VkDeviceMemory transferMemory;
-	VkImageLayout transferImageLayout;
-
-	std::vector<VkImageCopy> imageCopyBuffer;
+	const VkComponentMapping *pcomponentMapping;
 	
 	sint dmafd;
-	//struct gbm_bo *pgbmBufferObject;
 	const class X11Compositor *pcomp11;
 
 	static const VkComponentMapping pixmapComponentMapping;
@@ -78,18 +74,34 @@ public:
 	void Detach(uint64);
 	void Update(const VkCommandBuffer *, const VkRect2D *, uint);
 
-	VkBuffer transferBuffer;
-	VkDeviceMemory transferMemory;
-	std::vector<std::tuple<uint64, VkDeviceMemory, VkBuffer>> discards;
+	const VkComponentMapping *pcomponentMapping;
 
-	std::vector<VkBufferImageCopy> bufferImageCopyBuffer;
+	VkBuffer transferBuffer;
+	std::vector<std::tuple<uint64, VkDeviceMemory, VkBuffer>> discards;
 };
 
-//class Texture : public TextureStaged, public TexturePixmap{
-class Texture : public TextureStaged, public TextureHostPointer{
+class TextureDMABuffer : public TexturePixmap{
 public:
-	Texture(uint, uint, const VkComponentMapping *, uint, const class CompositorInterface *);
-	~Texture();
+	TextureDMABuffer(uint, uint, const VkComponentMapping *, uint, const class CompositorInterface *);
+	~TextureDMABuffer();
+};
+
+class TextureSharedMemory : public TextureHostPointer{
+public:
+	TextureSharedMemory(uint, uint, const VkComponentMapping *, uint, const class CompositorInterface *);
+	~TextureSharedMemory();
+};
+
+class TextureSharedMemoryStaged : public TextureStaged{
+public:
+	TextureSharedMemoryStaged(uint, uint, const VkComponentMapping *, uint, const class CompositorInterface *);
+	~TextureSharedMemoryStaged();
+};
+
+class TextureCompatible : public TextureStaged{
+public:
+	TextureCompatible(uint, uint, const VkComponentMapping *, uint, const class CompositorInterface *);
+	~TextureCompatible();
 };
 
 class Buffer{

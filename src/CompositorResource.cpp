@@ -5,14 +5,15 @@
 #include "compositor.h"
 
 #include <algorithm>
-//#include <gbm.h>
 #include <unistd.h>
+#include <libdrm/drm_fourcc.h>
+//#include <fcntl.h>
 
 #include "spirv_reflect.h"
 
 namespace Compositor{
 
-TextureBase::TextureBase(uint _w, uint _h, VkFormat format, const VkComponentMapping *pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : w(_w), h(_h), flags(_flags), imageLayout(VK_IMAGE_LAYOUT_UNDEFINED), pcomp(_pcomp){
+TextureBase::TextureBase(uint _w, uint _h, VkFormat format, const VkComponentMapping *pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : w(_w), h(_h), flags(_flags), imageLayout(VK_IMAGE_LAYOUT_UNDEFINED), image(0), imageView(0), deviceMemory(0), pcomp(_pcomp){
 	//
 	auto m = std::find_if(formatSizeMap.begin(),formatSizeMap.end(),[&](auto &r)->bool{
 		return r.first == format;
@@ -21,6 +22,9 @@ TextureBase::TextureBase(uint _w, uint _h, VkFormat format, const VkComponentMap
 
 	//DebugPrintf(stdout,"*** creating texture: %u, (%ux%u)\n",(*m).second,w,h);
 	componentMappingHash = GetComponentMappingHash(pcomponentMapping);
+
+	if(flags & TEXTURE_BASE_FLAG_SKIP)
+		return; //only one image is needed by the derived class
 
 	//image
 	VkImageCreateInfo imageCreateInfo = {};
@@ -65,16 +69,6 @@ TextureBase::TextureBase(uint _w, uint _h, VkFormat format, const VkComponentMap
 	imageViewCreateInfo.image = image;
 	imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	imageViewCreateInfo.format = format;
-	/*if(flags & FLAG_SWIZZLE_PIXMAP){
-		imageViewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_B;//VK_COMPONENT_SWIZZLE_IDENTITY;
-		imageViewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_G;//VK_COMPONENT_SWIZZLE_IDENTITY;
-		imageViewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_R;//VK_COMPONENT_SWIZZLE_IDENTITY;
-	}else{
-		imageViewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-		imageViewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-		imageViewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-	}
-	imageViewCreateInfo.components.a = (flags & FLAG_IGNORE_ALPHA)?VK_COMPONENT_SWIZZLE_ONE:VK_COMPONENT_SWIZZLE_IDENTITY;*/
 	imageViewCreateInfo.components = *pcomponentMapping;
 	imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
@@ -87,6 +81,9 @@ TextureBase::TextureBase(uint _w, uint _h, VkFormat format, const VkComponentMap
 }
 
 TextureBase::~TextureBase(){
+	if(flags & TEXTURE_BASE_FLAG_SKIP)
+		return;
+
 	vkDestroyImageView(pcomp->logicalDev,imageView,0);
 
 	vkFreeMemory(pcomp->logicalDev,deviceMemory,0);
@@ -105,7 +102,7 @@ const VkComponentMapping TextureBase::defaultComponentMapping = {
 	VK_COMPONENT_SWIZZLE_IDENTITY
 };
 
-TextureStaged::TextureStaged(uint _w, uint _h, VkFormat _format, const VkComponentMapping *_pcomponentMapping,uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,_format,_pcomponentMapping,_flags,_pcomp){
+TextureStaged::TextureStaged(uint _w, uint _h, VkFormat _format, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,_format,_pcomponentMapping,_flags,_pcomp){
 	//
 	//staging buffer
 	VkBufferCreateInfo bufferCreateInfo = {};
@@ -164,7 +161,7 @@ void TextureStaged::Unmap(const VkCommandBuffer *pcommandBuffer, const VkRect2D 
 	imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	imageMemoryBarrier.image = image;
 	imageMemoryBarrier.subresourceRange = imageSubresourceRange;
-	imageMemoryBarrier.srcAccessMask = 0;
+	imageMemoryBarrier.srcAccessMask = 0u;
 	imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	imageMemoryBarrier.oldLayout = imageLayout;//VK_IMAGE_LAYOUT_UNDEFINED;
 	imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -199,7 +196,7 @@ void TextureStaged::Unmap(const VkCommandBuffer *pcommandBuffer, const VkRect2D 
 	imageLayout = imageMemoryBarrier.newLayout;
 }
 
-TexturePixmap::TexturePixmap(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp), transferImageLayout(VK_IMAGE_LAYOUT_PREINITIALIZED){
+TexturePixmap::TexturePixmap(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags|TEXTURE_BASE_FLAG_SKIP,_pcomp), pcomponentMapping(_pcomponentMapping){
 	pcomp11 = dynamic_cast<const X11Compositor *>(pcomp);
 }
 
@@ -208,39 +205,93 @@ TexturePixmap::~TexturePixmap(){
 }
 
 //only pixmaps that correspond to the created texture in size should be attached
-void TexturePixmap::Attach(xcb_pixmap_t pixmap){
-	xcb_dri3_buffer_from_pixmap_cookie_t bufferFromPixmapCookie = xcb_dri3_buffer_from_pixmap(pcomp11->pbackend->pcon,pixmap);
-	xcb_dri3_buffer_from_pixmap_reply_t *pbufferFromPixmapReply = xcb_dri3_buffer_from_pixmap_reply(pcomp11->pbackend->pcon,bufferFromPixmapCookie,0);
+bool TexturePixmap::Attach(xcb_pixmap_t pixmap){
+	xcb_dri3_buffers_from_pixmap_cookie_t buffersFromPixmapCookie = xcb_dri3_buffers_from_pixmap(pcomp11->pbackend->pcon,pixmap);
+	xcb_dri3_buffers_from_pixmap_reply_t *pbuffersFromPixmapReply = xcb_dri3_buffers_from_pixmap_reply(pcomp11->pbackend->pcon,buffersFromPixmapCookie,0);
+	if(!pbuffersFromPixmapReply){
+		DebugPrintf(stderr,"Failed to get buffers from pixmap (DRI3 ext).\n");
+		return false;
+	}
 
-	dmafd = xcb_dri3_buffer_from_pixmap_reply_fds(pcomp11->pbackend->pcon,pbufferFromPixmapReply)[0]; //TODO: get all planes?
+	int *pdmafds = xcb_dri3_buffers_from_pixmap_buffers(pbuffersFromPixmapReply);
+	if(!pdmafds){
+		DebugPrintf(stderr,"NULL DMA-buf fd.\n");
+		free(pbuffersFromPixmapReply);
+		return false;
+	}
+	//dmafd = pdmafds[0];
 
-	/*struct gbm_import_fd_data gbmImportFdData = {
-		.fd = dmafd,
-		.width = w,
-		.height = h,
-		.stride = pbufferFromPixmapReply->stride,
-		.format = GBM_FORMAT_ARGB8888
-	};
-	pgbmBufferObject = gbm_bo_import(pcomp11->pgbmdev,GBM_BO_IMPORT_FD,&gbmImportFdData,0);//GBM_BO_USE_LINEAR);
-	if(!pgbmBufferObject) //TODO: import once for the first buffer, assume same modifiers and format for all?
-		throw Exception("Failed to import GBM buffer object.");*/
+	uint *pstrides = xcb_dri3_buffers_from_pixmap_strides(pbuffersFromPixmapReply);
+	uint *poffsets = xcb_dri3_buffers_from_pixmap_offsets(pbuffersFromPixmapReply); //---
 
-	VkSubresourceLayout subresourceLayout = {};
-	subresourceLayout.offset = 0;
-	subresourceLayout.size = (uint)pbufferFromPixmapReply->size;//(uint)pbufferFromPixmapReply->stride*h;
-	subresourceLayout.rowPitch = (uint)pbufferFromPixmapReply->stride;
-	subresourceLayout.arrayPitch = subresourceLayout.size;
-	subresourceLayout.depthPitch = subresourceLayout.size;
+	uint64 modifier = pbuffersFromPixmapReply->modifier;
+	//-------------------------------------
 
-	uint64_t modifier = 0;//gbm_bo_get_modifier(pgbmBufferObject);
-	/*sint planeCount = gbm_bo_get_plane_count(pgbmBufferObject);
-	DebugPrintf(stdout,"Image modifier: %llu, plane count: %d\n",modifier,planeCount);*/
+	//AMD: 0x1002, nvidia: 0x10de
+	if(pcomp->physicalDevProps.vendorID == 0x8086){ //trust the query only on intel for now
+		if(std::find_if(pcomp->drmFormatModifiers.begin(),pcomp->drmFormatModifiers.end(),[&](auto &p)->bool{
+			return modifier == p.first;
+		}) != pcomp->drmFormatModifiers.end()){
+			printf("DRM format modifier %llu found during query.\n",modifier);
+		}else{
+			VkPhysicalDeviceImageDrmFormatModifierInfoEXT drmInfo = {};
+			drmInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT;
+			drmInfo.drmFormatModifier = modifier;
+			drmInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+			VkPhysicalDeviceExternalImageFormatInfo externalImageFormatInfo = {};
+			externalImageFormatInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
+			externalImageFormatInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+			externalImageFormatInfo.pNext = &drmInfo;
+
+			VkPhysicalDeviceImageFormatInfo2 imageFormatInfo2 = {};
+			imageFormatInfo2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+			imageFormatInfo2.pNext = &externalImageFormatInfo;
+			imageFormatInfo2.format = VK_FORMAT_R8G8B8A8_UNORM;
+			imageFormatInfo2.type = VK_IMAGE_TYPE_2D;
+			imageFormatInfo2.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+			imageFormatInfo2.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+			imageFormatInfo2.flags = 0;
+
+			VkExternalImageFormatProperties externalImageFormatProps = {};
+			externalImageFormatProps.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+
+			VkImageFormatProperties2 imageFormatProps2 = {};
+			imageFormatProps2.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+			imageFormatProps2.pNext = &externalImageFormatProps;
+			if(vkGetPhysicalDeviceImageFormatProperties2(pcomp->physicalDev,&imageFormatInfo2,&imageFormatProps2) == VK_ERROR_FORMAT_NOT_SUPPORTED){
+				DebugPrintf(stdout,"vkGetPhysicalDeviceImageFormatProperties2 failed for modifier %llu.\n",modifier);
+				//try specify the format modifier explicitly
+				for(auto &p : pcomp->drmFormatModifiers){
+					printf("  Try: %llu, %u (accept %u planes)\n",p.first,p.second,pbuffersFromPixmapReply->nfd);
+					if(p.first == 0 || p.second != pbuffersFromPixmapReply->nfd)
+						continue;
+					drmInfo.drmFormatModifier = p.first;//I915_FORMAT_MOD_X_TILED;
+					if(vkGetPhysicalDeviceImageFormatProperties2(pcomp->physicalDev,&imageFormatInfo2,&imageFormatProps2) == VK_SUCCESS){
+						modifier = p.first;
+						break;
+					}
+				}
+				if(modifier == pbuffersFromPixmapReply->modifier)
+					DebugPrintf(stderr,"Unable to find compatible DRM modifier: pixmap: %llu. Check format query list output.\n");
+			}
+		}
+	}
+
+	VkSubresourceLayout subresourceLayout[256];
+	for(uint i = 0; i < pbuffersFromPixmapReply->nfd; ++i){
+		subresourceLayout[i].offset = poffsets[i];
+		subresourceLayout[i].size = 0;
+		subresourceLayout[i].rowPitch = pstrides[i];
+		subresourceLayout[i].arrayPitch = 0;
+		subresourceLayout[i].depthPitch = 0;
+	}
 
 	VkImageDrmFormatModifierExplicitCreateInfoEXT imageDrmFormatModifierExpCreateInfo = {};
 	imageDrmFormatModifierExpCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
-	imageDrmFormatModifierExpCreateInfo.drmFormatModifier = modifier;//gbm_bo_get_modifier(pgbmBufferObject);
-	imageDrmFormatModifierExpCreateInfo.drmFormatModifierPlaneCount = 1;
-	imageDrmFormatModifierExpCreateInfo.pPlaneLayouts = &subresourceLayout;
+	imageDrmFormatModifierExpCreateInfo.drmFormatModifier = modifier;
+	imageDrmFormatModifierExpCreateInfo.drmFormatModifierPlaneCount = pbuffersFromPixmapReply->nfd;
+	imageDrmFormatModifierExpCreateInfo.pPlaneLayouts = subresourceLayout;
 
 	VkExternalMemoryImageCreateInfo externalMemoryCreateInfo = {};
 	externalMemoryCreateInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
@@ -256,29 +307,40 @@ void TexturePixmap::Attach(xcb_pixmap_t pixmap){
 	imageCreateInfo.mipLevels = 1;
 	imageCreateInfo.arrayLayers = 1;
 	imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM; //todo: format from image reply?
-	//imageCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;//VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
 	imageCreateInfo.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT; //need the extension
-	imageCreateInfo.initialLayout = transferImageLayout;//VK_IMAGE_LAYOUT_PREINITIALIZED;//VK_IMAGE_LAYOUT_UNDEFINED;
-	//imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;//transferImageLayout;
+	imageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;//VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageCreateInfo.flags = 0;
 	imageCreateInfo.pNext = &externalMemoryCreateInfo;
-	if(vkCreateImage(pcomp->logicalDev,&imageCreateInfo,0,&transferImage) != VK_SUCCESS)
-		throw Exception("Failed to create an image.");
+	if(vkCreateImage(pcomp->logicalDev,&imageCreateInfo,0,&image) != VK_SUCCESS){
+		DebugPrintf(stderr,"Failed to create an image.\n");
+		free(pbuffersFromPixmapReply);
+		return false;
+	}
 	
-	VkMemoryFdPropertiesKHR memoryFdProps;
+	VkMemoryFdPropertiesKHR memoryFdProps = {};
 	memoryFdProps.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
-	if(((PFN_vkGetMemoryFdPropertiesKHR)vkGetInstanceProcAddr(pcomp11->instance,"vkGetMemoryFdPropertiesKHR"))(pcomp->logicalDev,VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,dmafd,&memoryFdProps) != VK_SUCCESS)
-		throw Exception("Failed to get memory fd properties.");
+	if(((PFN_vkGetMemoryFdPropertiesKHR)vkGetInstanceProcAddr(pcomp11->instance,"vkGetMemoryFdPropertiesKHR"))(pcomp->logicalDev,VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,pdmafds[0],&memoryFdProps) != VK_SUCCESS){
+		DebugPrintf(stderr,"Failed to get memory fd properties.\n");
+		free(pbuffersFromPixmapReply);
+		return false;
+	}
 
 	VkMemoryRequirements memoryRequirements;
-	vkGetImageMemoryRequirements(pcomp->logicalDev,transferImage,&memoryRequirements);
+	vkGetImageMemoryRequirements(pcomp->logicalDev,image,&memoryRequirements);
+
+	/*if((dmafd = fcntl(pdmafds[0],F_DUPFD_CLOEXEC,0)) < 0){
+		DebugPrintf(stderr,"Failed to duplicate DMA FD %d. fcntl error %d.\n",pdmafds[0],dmafd);
+		free(pbuffersFromPixmapReply);
+		return false;
+	}*/
+	dmafd = pdmafds[0];
 	
 	VkMemoryDedicatedAllocateInfo memoryDedicatedAllocateInfo = {};
 	memoryDedicatedAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
-	memoryDedicatedAllocateInfo.image = transferImage;
+	memoryDedicatedAllocateInfo.image = image;
 
 	VkImportMemoryFdInfoKHR importMemoryFdInfo = {};
 	importMemoryFdInfo.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
@@ -295,24 +357,67 @@ void TexturePixmap::Attach(xcb_pixmap_t pixmap){
 		if(memoryFdProps.memoryTypeBits & (1<<memoryAllocateInfo.memoryTypeIndex))
 			break;
 	}
-	if(vkAllocateMemory(pcomp->logicalDev,&memoryAllocateInfo,0,&transferMemory) != VK_SUCCESS)
-		throw Exception("Failed to allocate transfer image memory."); //NOTE: may return invalid handle, if the buffer that we're trying to import is only shortly available (for example firefox animating it's url menu by resizing). Need xcb_dri3 fences to keep the handle alive most likely.
-	if(vkBindImageMemory(pcomp->logicalDev,transferImage,transferMemory,0) != VK_SUCCESS)
-		throw Exception("Failed to bind transfer image memory.");
+	if(vkAllocateMemory(pcomp->logicalDev,&memoryAllocateInfo,0,&deviceMemory) != VK_SUCCESS){
+		DebugPrintf(stderr,"Failed to allocate transfer image memory.\n");
+		//close(dmafd);
+		free(pbuffersFromPixmapReply);
+		return false;
+	}
+	if(vkBindImageMemory(pcomp->logicalDev,image,deviceMemory,0) != VK_SUCCESS){
+		DebugPrintf(stderr,"Failed to bind transfer image memory.\n");
+		vkFreeMemory(pcomp->logicalDev,deviceMemory,0);
+		free(pbuffersFromPixmapReply);
+		return false;
+	}
 
-	free(pbufferFromPixmapReply);
+	VkImageViewCreateInfo imageViewCreateInfo = {};
+	imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	imageViewCreateInfo.image = image;
+	imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	imageViewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	imageViewCreateInfo.components = *pcomponentMapping;
+	/*imageViewCreateInfo.components = pbuffersFromPixmapReply->bpp == 24
+		?pixmapComponentMapping24
+		:pixmapComponentMapping;*/
+	imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+	imageViewCreateInfo.subresourceRange.levelCount = 1;
+	imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+	imageViewCreateInfo.subresourceRange.layerCount = 1;
+	if(vkCreateImageView(pcomp->logicalDev,&imageViewCreateInfo,0,&imageView) != VK_SUCCESS){
+		vkFreeMemory(pcomp->logicalDev,deviceMemory,0);
+		free(pbuffersFromPixmapReply);
+		DebugPrintf(stderr,"Failed to create texture image view.\n");
+		return false;
+	}
+	
+	free(pbuffersFromPixmapReply);
+
+	imageLayout = imageCreateInfo.initialLayout;
+
+	return true;
 }
 
 void TexturePixmap::Detach(){
-	vkFreeMemory(pcomp->logicalDev,transferMemory,0);
-	vkDestroyImage(pcomp->logicalDev,transferImage,0);
+	vkDeviceWaitIdle(pcomp->logicalDev); //TODO: remove, and fix the buffer freeing
+	if(deviceMemory){ //check if attached
+		vkDestroyImageView(pcomp->logicalDev,imageView,0);
 
-	//gbm_bo_destroy(pgbmBufferObject);
-	close(dmafd);
+		vkFreeMemory(pcomp->logicalDev,deviceMemory,0);
+		vkDestroyImage(pcomp->logicalDev,image,0);
+
+		imageView = 0;
+		deviceMemory = 0;
+		image = 0;
+	}
+
+	//close(dmafd); //closed by vkFreeMemory
 }
 
 void TexturePixmap::Update(const VkCommandBuffer *pcommandBuffer, const VkRect2D *prects, uint rectCount){
-	//
+	if(imageLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+		return;
+
 	VkImageSubresourceRange imageSubresourceRange = {};
 	imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	imageSubresourceRange.baseMipLevel = 0;
@@ -320,58 +425,19 @@ void TexturePixmap::Update(const VkCommandBuffer *pcommandBuffer, const VkRect2D
 	imageSubresourceRange.baseArrayLayer = 0;
 	imageSubresourceRange.layerCount = 1;
 
-	VkImageMemoryBarrier transferImageMemoryBarrier = {};
-	transferImageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	transferImageMemoryBarrier.image = transferImage;
-	transferImageMemoryBarrier.subresourceRange = imageSubresourceRange;
-	transferImageMemoryBarrier.srcAccessMask = 0;
-	transferImageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	//transferImageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	transferImageMemoryBarrier.oldLayout = transferImageLayout;
-	transferImageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-	//vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,
-		//0,0,0,0,1,&transferImageMemoryBarrier);
-
 	VkImageMemoryBarrier imageMemoryBarrier = {};
 	imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	imageMemoryBarrier.image = image;
 	imageMemoryBarrier.subresourceRange = imageSubresourceRange;
-	imageMemoryBarrier.srcAccessMask = 0;
-	imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	imageMemoryBarrier.oldLayout = imageLayout;//VK_IMAGE_LAYOUT_UNDEFINED;
-	imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	//vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,
-		//0,0,0,0,1,&imageMemoryBarrier);
-	const VkImageMemoryBarrier barriers[] = {imageMemoryBarrier,transferImageMemoryBarrier};
-	vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,
-		0,0,0,0,2,barriers);
-	
-	VkImageSubresourceLayers imageSubresourceLayers = {};
-	imageSubresourceLayers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	imageSubresourceLayers.mipLevel = 0;
-	imageSubresourceLayers.baseArrayLayer = 0;
-	imageSubresourceLayers.layerCount = 1;
-
-	imageCopyBuffer.reserve(rectCount);
-	for(uint i = 0; i < rectCount; ++i){
-		imageCopyBuffer[i].srcSubresource = imageSubresourceLayers;
-		imageCopyBuffer[i].srcOffset = (VkOffset3D){prects[i].offset.x,prects[i].offset.y,0};
-		imageCopyBuffer[i].dstSubresource = imageSubresourceLayers;
-		imageCopyBuffer[i].dstOffset = imageCopyBuffer[i].srcOffset;
-		imageCopyBuffer[i].extent = (VkExtent3D){prects[i].extent.width,prects[i].extent.height,1};
-	}
-	vkCmdCopyImage(*pcommandBuffer,transferImage,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,rectCount,imageCopyBuffer.data());
-
-	//create in transfer stage, use in fragment shader stage
-	imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	imageMemoryBarrier.srcAccessMask = 0u;
 	imageMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,
+	//vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,
+	vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,
 		0,0,0,0,1,&imageMemoryBarrier);
-	
+
 	imageLayout = imageMemoryBarrier.newLayout;
-	transferImageLayout = transferImageMemoryBarrier.newLayout;
 }
 
 const VkComponentMapping TexturePixmap::pixmapComponentMapping = {
@@ -388,7 +454,7 @@ const VkComponentMapping TexturePixmap::pixmapComponentMapping24 = {
 	VK_COMPONENT_SWIZZLE_ONE
 };
 
-TextureHostPointer::TextureHostPointer(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp){
+TextureHostPointer::TextureHostPointer(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags|TEXTURE_BASE_FLAG_SKIP,_pcomp), transferBuffer(0), pcomponentMapping(_pcomponentMapping){
 	//
 	discards.reserve(2);
 }
@@ -415,14 +481,14 @@ bool TextureHostPointer::Attach(unsigned char *pchpixels){
 	bufferCreateInfo.pNext = &externalMemoryBufferCreateInfo;
 	if(vkCreateBuffer(pcomp->logicalDev,&bufferCreateInfo,0,&transferBuffer) != VK_SUCCESS){
 		//throw Exception("Failed to create a transfer buffer.");
-		DebugPrintf(stderr,"Failed to create a transfer buffer.");
+		DebugPrintf(stderr,"Failed to create a transfer buffer.\n");
 		return false;
 	}
 
-	VkMemoryHostPointerPropertiesEXT memoryHostPointerProps;
+	VkMemoryHostPointerPropertiesEXT memoryHostPointerProps = {};
 	memoryHostPointerProps.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
 	if(((PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetInstanceProcAddr(pcomp->instance,"vkGetMemoryHostPointerPropertiesEXT"))(pcomp->logicalDev,VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,pchpixels,&memoryHostPointerProps) != VK_SUCCESS){
-		DebugPrintf(stderr,"Failed to get memory host pointer properties.");
+		DebugPrintf(stderr,"Failed to get memory host pointer properties.\n");
 		vkDestroyBuffer(pcomp->logicalDev,transferBuffer,0);
 		return false;
 	}
@@ -452,17 +518,58 @@ bool TextureHostPointer::Attach(unsigned char *pchpixels){
 		if((memoryRequirements.memoryTypeBits & memoryHostPointerProps.memoryTypeBits) & (1<<memoryAllocateInfo.memoryTypeIndex) && physicalDeviceMemoryProps.memoryTypes[memoryAllocateInfo.memoryTypeIndex].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
 			break;
 	}
-	if(vkAllocateMemory(pcomp->logicalDev,&memoryAllocateInfo,0,&transferMemory) != VK_SUCCESS){
-		DebugPrintf(stderr,"Failed to allocate transfer buffer memory.");
+	if(vkAllocateMemory(pcomp->logicalDev,&memoryAllocateInfo,0,&deviceMemory) != VK_SUCCESS){
+		DebugPrintf(stderr,"Failed to allocate transfer buffer memory.\n");
 		vkDestroyBuffer(pcomp->logicalDev,transferBuffer,0);
 		return false;
 	}
-	if(vkBindBufferMemory(pcomp->logicalDev,transferBuffer,transferMemory,0) != VK_SUCCESS){
-		DebugPrintf(stderr,"Failed to bind transfer buffer memory.");
-		vkFreeMemory(pcomp->logicalDev,transferMemory,0);
+	if(vkBindBufferMemory(pcomp->logicalDev,transferBuffer,deviceMemory,0) != VK_SUCCESS){
+		DebugPrintf(stderr,"Failed to bind transfer buffer memory.\n");
+		vkFreeMemory(pcomp->logicalDev,deviceMemory,0);
 		vkDestroyBuffer(pcomp->logicalDev,transferBuffer,0);
 		return false;
 	}
+
+	VkExternalMemoryImageCreateInfo externalMemoryCreateInfo = {};
+	externalMemoryCreateInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	externalMemoryCreateInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+
+	VkImageCreateInfo imageCreateInfo = {};
+	imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageCreateInfo.extent.width = w;
+	imageCreateInfo.extent.height = h;
+	imageCreateInfo.extent.depth = 1;
+	imageCreateInfo.mipLevels = 1;
+	imageCreateInfo.arrayLayers = 1;
+	imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	imageCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
+	imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	imageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+	imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageCreateInfo.flags = 0;
+	imageCreateInfo.pNext = &externalMemoryCreateInfo;
+	if(vkCreateImage(pcomp->logicalDev,&imageCreateInfo,0,&image) != VK_SUCCESS)
+		throw Exception("Failed to create an image.");
+
+	if(vkBindImageMemory(pcomp->logicalDev,image,deviceMemory,0) != VK_SUCCESS)
+		throw Exception("Failed to bind image memory.");
+
+	VkImageViewCreateInfo imageViewCreateInfo = {};
+	imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	imageViewCreateInfo.image = image;
+	imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	imageViewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	imageViewCreateInfo.components = *pcomponentMapping;
+	imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+	imageViewCreateInfo.subresourceRange.levelCount = 1;
+	imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+	imageViewCreateInfo.subresourceRange.layerCount = 1;
+	if(vkCreateImageView(pcomp->logicalDev,&imageViewCreateInfo,0,&imageView) != VK_SUCCESS)
+		throw Exception("Failed to create texture image view.");
+
 	return true;
 }
 
@@ -476,12 +583,22 @@ void TextureHostPointer::Detach(uint64 releaseTag){
 	}));
 	//discards.push_back(std::tuple<uint64, VkDeviceMemory, VkBuffer>(releaseTag,transferMemory,transferBuffer));
 	vkDeviceWaitIdle(pcomp->logicalDev); //TODO: remove, and fix the buffer freeing
-	vkFreeMemory(pcomp->logicalDev,transferMemory,0);
-	vkDestroyBuffer(pcomp->logicalDev,transferBuffer,0);
+	if(transferBuffer){
+		vkFreeMemory(pcomp->logicalDev,deviceMemory,0);
+		vkDestroyBuffer(pcomp->logicalDev,transferBuffer,0);
+		vkDestroyImage(pcomp->logicalDev,image,0);
+
+		imageView = 0;
+		deviceMemory = 0;
+		transferBuffer = 0;
+		image = 0;
+	}
 }
 
 void TextureHostPointer::Update(const VkCommandBuffer *pcommandBuffer, const VkRect2D *prects, uint rectCount){
-	//
+	if(imageLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+		return;
+
 	VkImageSubresourceRange imageSubresourceRange = {};
 	imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	imageSubresourceRange.baseMipLevel = 0;
@@ -493,47 +610,46 @@ void TextureHostPointer::Update(const VkCommandBuffer *pcommandBuffer, const VkR
 	imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	imageMemoryBarrier.image = image;
 	imageMemoryBarrier.subresourceRange = imageSubresourceRange;
-	imageMemoryBarrier.srcAccessMask = 0;
-	imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	imageMemoryBarrier.oldLayout = imageLayout;//VK_IMAGE_LAYOUT_UNDEFINED;
-	imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,
-		0,0,0,0,1,&imageMemoryBarrier);
-
-	//transfer "stage"
-	bufferImageCopyBuffer.reserve(rectCount);
-	for(uint i = 0; i < rectCount; ++i){
-		bufferImageCopyBuffer[i].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		bufferImageCopyBuffer[i].imageSubresource.mipLevel = 0;
-		bufferImageCopyBuffer[i].imageSubresource.baseArrayLayer = 0;
-		bufferImageCopyBuffer[i].imageSubresource.layerCount = 1;
-		bufferImageCopyBuffer[i].imageExtent.width = prects[i].extent.width;//w/4; //w
-		bufferImageCopyBuffer[i].imageExtent.height = prects[i].extent.height;//h
-		bufferImageCopyBuffer[i].imageExtent.depth = 1;
-		bufferImageCopyBuffer[i].imageOffset = (VkOffset3D){prects[i].offset.x,prects[i].offset.y,0};//(VkOffset3D){w/4,0,0}; //x,y
-		bufferImageCopyBuffer[i].bufferOffset = (w*prects[i].offset.y+prects[i].offset.x)*formatSizeMap[formatIndex].second;//w/4*4; //(w*y+x)*format
-		bufferImageCopyBuffer[i].bufferRowLength = w;
-		bufferImageCopyBuffer[i].bufferImageHeight = h;
-	}
-	vkCmdCopyBufferToImage(*pcommandBuffer,transferBuffer,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,rectCount,bufferImageCopyBuffer.data());
-
-	//create in transfer stage, use in fragment shader stage
-	imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	imageMemoryBarrier.srcAccessMask = 0u;
 	imageMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,
+	//vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,
+	vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,
 		0,0,0,0,1,&imageMemoryBarrier);
-	
+
 	imageLayout = imageMemoryBarrier.newLayout;
 }
 
-//Texture::Texture(uint _w, uint _h, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomp), TextureStaged(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomp), TexturePixmap(_w,_h,_pcomp){
-Texture::Texture(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp), TextureStaged(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp), TextureHostPointer(_w,_h,_pcomponentMapping,_flags,_pcomp){
+TextureDMABuffer::TextureDMABuffer(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags|TEXTURE_BASE_FLAG_SKIP,_pcomp), TexturePixmap(_w,_h,_pcomponentMapping,_flags,_pcomp){
 	//
 }
 
-Texture::~Texture(){
+TextureDMABuffer::~TextureDMABuffer(){
+	//
+}
+
+TextureSharedMemory::TextureSharedMemory(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags|TEXTURE_BASE_FLAG_SKIP,_pcomp), TextureHostPointer(_w,_h,_pcomponentMapping,_flags,_pcomp){
+	//
+}
+
+TextureSharedMemory::~TextureSharedMemory(){
+	//
+}
+
+TextureSharedMemoryStaged::TextureSharedMemoryStaged(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp), TextureStaged(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp){
+	//
+}
+
+TextureSharedMemoryStaged::~TextureSharedMemoryStaged(){
+	//
+}
+
+TextureCompatible::TextureCompatible(uint _w, uint _h, const VkComponentMapping *_pcomponentMapping, uint _flags, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp), TextureStaged(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomponentMapping,_flags,_pcomp){
+	//
+}
+
+TextureCompatible::~TextureCompatible(){
 	//
 }
 

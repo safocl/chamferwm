@@ -64,6 +64,7 @@ public:
 		glm::vec2 maxSize = glm::vec2(1.0f);
 		uint flags = 0;
 		TITLEBAR titleBar = TITLEBAR_NONE;
+		bool titleStackOnly = false;
 		float titlePad = 0.0f;
 	};
 	Container(); //root container
@@ -125,13 +126,14 @@ public:
 	glm::mat2x2 titleTransform;
 	float absTitlePad;
 
-	glm::vec2 size; //size relative to the parent container
+	glm::vec2 size; //size relative to the parent container, V split and H split size. When floating, this is the actual size (rect).
 	glm::vec2 minSize; //min size, relative to screen
 	glm::vec2 maxSize; //max size, relative to screen
 
 	uint flags;
 	LAYOUT layout;
 	TITLEBAR titleBar;
+	bool titleStackOnly; //title is rendered only when stacking
 
 	static WManager::Container *ptreeFocus; //client focus, managed by Python
 	static std::deque<std::pair<WManager::Container *, struct timespec>> tiledFocusQueue;

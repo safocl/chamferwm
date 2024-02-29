@@ -19,8 +19,7 @@ Container::Container() : pParent(0), pch(0), pnext(0), pRootNext(this),
 	//scale(1.0f), p(0.0f), e(1.0f), margin(0.0f), minSize(0.0f), maxSize(1.0f), mode(MODE_TILED),
 	p(0.0f), posFullCanvas(0.0f), e(1.0f), extFullCanvas(1.0f), canvasOffset(0.0f), canvasExtent(0.0f),
 	margin(0.015f), titlePad(0.0f), titleSpan(0.0f,1.0f), titleTransform(glm::mat2x2(1.0f)), absTitlePad(0.0f), size(1.0f), minSize(0.015f), maxSize(1.0f),
-	flags(0), layout(LAYOUT_VSPLIT), titleBar(TITLEBAR_NONE){//, flags(0){
-	//
+	flags(0), layout(LAYOUT_VSPLIT), titleBar(TITLEBAR_NONE), titleStackOnly(false){
 	//This constructor creates a root container, since no parent is given.
 	rootQueue.push_back(this);
 }
@@ -31,7 +30,7 @@ Container::Container(Container *_pParent, const Setup &setup) :
 	pname(0),
 	canvasOffset(setup.canvasOffset), canvasExtent(setup.canvasExtent),
 	margin(setup.margin), titlePad(0.0f), titleSpan(0.0f,1.0f), titleTransform(glm::mat2x2(1.0f)), absTitlePad(setup.titlePad), size(setup.size), minSize(setup.minSize), maxSize(setup.maxSize),// mode(setup.mode),
-	flags(setup.flags), layout(LAYOUT_VSPLIT), titleBar(setup.titleBar){//, flags(setup.flags){
+	flags(setup.flags), layout(LAYOUT_VSPLIT), titleBar(setup.titleBar), titleStackOnly(setup.titleStackOnly){
 
 	if(setup.pname)
 		SetName(setup.pname);
@@ -85,11 +84,14 @@ Container::Container(Container *_pParent, const Setup &setup) :
 
 		uint containerCount = 0;
 		for(Container *pcontainer = pParent->pch; pcontainer; ++containerCount, pcontainer = pcontainer->pnext);
-		size = glm::vec2(1.0f/(float)containerCount);
+		//size = glm::vec2(1.0f/(float)containerCount);
+		size = glm::max(glm::vec2(1.0f/(float)containerCount),glm::vec2(0.1f));
 
+		glm::vec2 sizeComp = glm::vec2(1.0f)-size;
 		for(Container *pcontainer = pParent->pch; pcontainer; pcontainer = pcontainer->pnext)
 			if(pcontainer != this)
-				pcontainer->size *= glm::vec2(1.0f)-size;
+				pcontainer->size = glm::max(pcontainer->size*sizeComp,glm::vec2(0.1f));
+				//pcontainer->size *= glm::vec2(1.0f)-size;
 
 	}
 
@@ -129,11 +131,13 @@ void Container::Place(Container *pParent1){
 
 	uint containerCount = 0;
 	for(Container *pcontainer = pParent->pch; pcontainer; ++containerCount, pcontainer = pcontainer->pnext);
-	size = glm::vec2(1.0f/(float)containerCount);
+	size = glm::max(glm::vec2(1.0f/(float)containerCount),glm::vec2(0.1f));
 
+	glm::vec2 sizeComp = glm::vec2(1.0f)-size;
 	for(Container *pcontainer = pParent->pch; pcontainer; pcontainer = pcontainer->pnext)
 		if(pcontainer != this)
-			pcontainer->size *= glm::vec2(1.0f)-size;
+			pcontainer->size = glm::max(pcontainer->size*sizeComp,glm::vec2(0.1f));
+			//pcontainer->size *= glm::vec2(1.0f)-size;
 	
 	GetRoot()->Stack();
 	pParent->Translate();
@@ -203,6 +207,10 @@ Container * Container::Collapse(){
 		pch = 0;
 		focusQueue.clear();
 
+		GetRoot()->Stack();
+		if(titleStackOnly && flags & FLAG_STACKED) //this is only needed to handle the stacking exclusive titlebars
+			pParent->Translate();
+
 		return this;
 
 	}else
@@ -223,10 +231,12 @@ Container * Container::Collapse(){
 		pch = 0; //dereference the leftover container
 		focusQueue.clear();
 
+		GetRoot()->Stack();
+		if(titleStackOnly && flags & FLAG_STACKED) //this is only needed to handle the stacking exclusive titlebars
+			pParent->Translate();
+
 		return this;
 	}
-
-	GetRoot()->Stack();
 
 	return 0;
 }
@@ -318,20 +328,36 @@ Container * Container::GetRoot(){
 	return proot;
 }
 
-void Container::SetSize(glm::vec2 size1){
+void Container::SetSize(glm::vec2 sizeNew){
+	if(glm::any(glm::lessThan(sizeNew,glm::vec2(0.1f))))
+		return; //ensure reasonable constraints
 	if(flags & FLAG_FLOATING){
-		p += 0.5f*(size-size1);
-		e = size1;
-		size = size1;
+		sizeNew = glm::max(sizeNew,glm::vec2(0.1f));
+		p += 0.5f*(size-sizeNew);
+		e = sizeNew;
+		size = sizeNew;
 		if(pclient)
 			pclient->UpdateTranslation();
 		return;
 	}
-	glm::vec2 sizeSum = glm::vec2(1.0f)-size;
-	size = size1;
+	glm::vec2 sizeCompRatio = (glm::vec2(1.0f)-sizeNew)/(glm::vec2(1.0f)-size);
+	if(size.x >= 1.0f){
+		sizeCompRatio.x = 1.0f;
+		sizeNew.x = 1.0f;
+	}
+	if(size.y >= 1.0f){
+		sizeCompRatio.y = 1.0f;
+		sizeNew.y = 1.0f;
+	}
+	//precheck - ensure the operation results in positive size for all windows
 	for(Container *pcontainer = pParent->pch; pcontainer; pcontainer = pcontainer->pnext)
 		if(pcontainer != this)
-			pcontainer->size *= (glm::vec2(1.0f)-size)/sizeSum;
+			if(glm::any(glm::lessThan(pcontainer->size*sizeCompRatio,glm::vec2(0.1f))))
+				return; //cancel the resize
+	for(Container *pcontainer = pParent->pch; pcontainer; pcontainer = pcontainer->pnext)
+		if(pcontainer != this)
+			pcontainer->size *= sizeCompRatio;
+	size = sizeNew;
 
 	pParent->Translate();
 }
@@ -353,6 +379,7 @@ void Container::SetTitlebar(TITLEBAR titleBar, bool translate){
 	case TITLEBAR_BOTTOM:
 		titlePad = glm::vec2(0.0f,absTitlePad);
 	default:
+		titlePad = glm::vec2(0.0f);
 		titleTransform = glm::mat2x2(1.0f);
 		break;
 	}

@@ -63,23 +63,29 @@ public:
 	virtual ~ClientFrame();
 	virtual void UpdateContents(const VkCommandBuffer *) = 0;
 	virtual void Exclude(bool);
-	void CreateSurface(uint, uint, uint);
+	enum SURFACE_DEPTH{
+		SURFACE_DEPTH_24,
+		SURFACE_DEPTH_32
+	};
+	void CreateSurface(uint, uint, SURFACE_DEPTH, bool = false);
 	void AdjustSurface(uint, uint);
 	void DestroySurface();
 	void SetShaders(const char *[Pipeline::SHADER_MODULE_COUNT]);
 	void SetTitle(const char *);
 	enum SHADER_FLAG{ //+config
 		SHADER_FLAG_FOCUS = 0x1,
-		SHADER_FLAG_FLOATING = 0x2,
-		SHADER_FLAG_STACKED = 0x4,
-		SHADER_FLAG_USER_BIT = 0x8
+		SHADER_FLAG_CONTAINER_FOCUS = 0x2,
+		SHADER_FLAG_FLOATING = 0x4,
+		SHADER_FLAG_STACKED = 0x8,
+		SHADER_FLAG_USER_BIT = 0x10
 	};
 protected:
 	void UpdateDescSets();
-	Texture *ptexture;
+	//Texture *ptexture;
+	TextureBase *ptexture;
 	class Text *ptitle;
 	std::string title;
-	uint surfaceDepth;
+	SURFACE_DEPTH surfaceDepth;
 public:
 	bool enabled; //in use and ready to draw
 protected:
@@ -92,7 +98,7 @@ friend class TextureBase;
 friend class TextureStaged;
 friend class TexturePixmap;
 friend class TextureHostPointer;
-friend class Texture;
+//friend class Texture;
 friend class Buffer;
 friend class ShaderModule;
 friend class Pipeline;
@@ -107,11 +113,19 @@ friend class X11ClientFrame;
 friend class X11Background;
 friend class X11DebugClientFrame;
 public:
+	enum IMPORT_MODE{
+		IMPORT_MODE_DMABUF,
+		IMPORT_MODE_HOST_MEMORY,
+		IMPORT_MODE_CPU_COPY,
+		IMPORT_MODE_COUNT
+	};
 	struct Configuration{
 		uint deviceIndex;
 		bool debugLayers;
 		bool scissoring;
-		bool hostMemoryImport;
+		bool incrementalPresent;
+		//bool hostMemoryImport;
+		IMPORT_MODE memoryImportMode;
 		bool unredirOnFullscreen;
 		bool enableAnimation;
 		float animationDuration;
@@ -132,11 +146,14 @@ protected:
 	void AddShader(const char *, const Blob *);
 	void AddDamageRegion(const VkRect2D *);
 	void AddDamageRegion(const WManager::Client *);
+public: //probably need a proxy
+	void FullDamageRegion(); //quickly mark the whole screen for redrawing
+protected:
 	void WaitIdle();
 	void CreateRenderQueueAppendix(const WManager::Client *, const WManager::Container *);
 	void CreateRenderQueue(const WManager::Container *, const WManager::Container *);
 	bool PollFrameFence(bool);
-	void GenerateCommandBuffers(const WManager::Container *, const std::vector<std::pair<const WManager::Client *, WManager::Client *>> *, const WManager::Container *);
+	void GenerateCommandBuffers(const std::deque<WManager::Client *> *, const WManager::Container *, const WManager::Client *);
 	void Present();
 	virtual bool CheckPresentQueueCompatibility(VkPhysicalDevice, uint) const = 0;
 	virtual void CreateSurfaceKHR(VkSurfaceKHR *) const = 0;
@@ -224,16 +241,13 @@ protected:
 	};
 	std::vector<RenderObject> renderQueue;
 
-	typedef std::tuple<const WManager::Client *, WManager::Client *, ClientFrame *> AppendixQueueElement;
-	std::deque<AppendixQueueElement> appendixQueue;
-
 	//Used textures get stored for potential reuse before they get destroyed and while waiting for the pipeline to get flushed.
 	//Many of the allocated window textures will initially have some common reoccuring size.
-	Texture * CreateTexture(uint, uint, uint);
-	void ReleaseTexture(Texture *);
+	TextureBase * CreateTexture(uint, uint, ClientFrame::SURFACE_DEPTH, bool = false);
+	void ReleaseTexture(TextureBase *);
 
 	struct TextureCacheEntry{
-		Texture *ptexture;
+		TextureBase *ptexture;
 		uint64 releaseTag;
 		struct timespec releaseTime;
 	};
@@ -249,6 +263,8 @@ protected:
 	};
 	std::vector<DescSetCacheEntry> descSetCache;
 
+	std::set<std::pair<uint64, uint>> drmFormatModifiers; //mod, planes
+
 	ClientFrame *pfsApp; //fullscreen state app for the current frame (for unredirection)
 	ClientFrame *pfsAppPrev; //fullscreen state app during previous frame (for unredirection)
 	bool frameApproval;
@@ -259,8 +275,9 @@ protected:
 	//config
 	bool debugLayers;
 	bool scissoring;
-	bool hostMemoryImport;
+	bool incrementalPresent;
 	bool unredirOnFullscreen;
+	IMPORT_MODE memoryImportMode;
 
 public:
 	bool enableAnimation;
@@ -374,7 +391,9 @@ public:
 		.deviceIndex = 0,
 		.debugLayers = false,
 		.scissoring = true,
-		.hostMemoryImport = true,
+		.incrementalPresent = true,
+		//.hostMemoryImport = true,
+		.memoryImportMode = IMPORT_MODE_DMABUF,
 		.enableAnimation = false,
 		.animationDuration = 0.3f,
 		.pfontName = "Monospace",
